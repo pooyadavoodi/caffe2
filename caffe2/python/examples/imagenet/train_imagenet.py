@@ -69,10 +69,14 @@ def addData(model, reader, batch_size, crop_size, mirror=True):
     )
     return data, label
 
-def addAccuracy(model, softmax, label):
-    accuracy = model.Accuracy([softmax, label], "accuracy")
-
+def addAccuracy(model, softmax, label, top_k):
+    accuracy = model.Accuracy([softmax, label], "accuracy_top{}".format(top_k), top_k=top_k)
     return accuracy
+
+def addCopy(model, src_name, dest_name, src_device):
+    if(src_device == 'gpu'):
+        dest = model.CopyGPUToCPU(src_name, dest_name, device_option=core.DeviceOption(caffe2_pb2.CUDA, 0))
+    return dest
 
 def generateTestModel(args, num_gpus, crop_size, mirror=False):
     # Don't init params, will reference from GPU0 training net
@@ -100,8 +104,13 @@ def generateTestModel(args, num_gpus, crop_size, mirror=False):
                 test_loss = test_model.AveragedLoss(xent, "test_loss")
                 
                 # Test-specific
-                accuracy = addAccuracy(test_model, softmax=pred, label=label)
+                accuracy_top1 = addAccuracy(test_model, softmax=pred, label=label, top_k=1)
+                accuracy_top5 = addAccuracy(test_model, softmax=pred, label=label, top_k=5)
 
+#            predCPU = addCopy(test_model, "pred", "predCPU", "gpu")
+#            labelCPU = addCopy(test_model, "label", "labelCPU", "gpu")
+#            accuracy_top1 = addAccuracy(test_model, softmax=predCPU, label=labelCPU, top_k=1)
+#            accuracy_top5 = addAccuracy(test_model, softmax=predCPU, label=labelCPU, top_k=5)
     return test_model
 
 def generateTrainModel(args, num_gpus, crop_size, mirror):
@@ -270,11 +279,13 @@ def main():
         if (i % test_interval == 0 and i != 0):
             workspace.RunNet(test_model.net.Proto().name)
             loss_sum = 0.
-            acc_sum = 0.
+            acc_top1_sum = 0.
+            acc_top5_sum = 0.
             for g in range(num_gpus):
-                acc_sum += workspace.FetchBlob("gpu_{}/accuracy".format(g))
+                acc_top1_sum += workspace.FetchBlob("gpu_{}/accuracy_top1".format(g))
+                acc_top5_sum += workspace.FetchBlob("gpu_{}/accuracy_top5".format(g))
                 loss_sum += workspace.FetchBlob("gpu_{}/test_loss".format(g))
-            acc_str = ", test loss: {0:4f}, test accuracy: {1:.3f}".format(float(loss_sum / num_gpus), float(acc_sum))
+            acc_str = ", test loss: {0:4f}, test accuracy top1: {1:.3f}, test accuracy top5: {2:.3f}".format(float(loss_sum / num_gpus), float(acc_top1_sum), float(acc_top5_sum))
             # print("iter: {0:8d} test loss: {1:4f}, test accuracy: {2:4f}".format(i, float(loss_sum / num_gpus), float(acc_sum)))
 
         # track Loss
