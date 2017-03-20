@@ -5,7 +5,6 @@ from __future__ import unicode_literals
 
 from caffe2.python import core, recurrent, workspace
 from caffe2.python.attention import AttentionType
-from caffe2.python.utils import debug
 from caffe2.python.model_helper import ModelHelperBase
 from caffe2.python.cnn import CNNModelHelper
 from hypothesis import given
@@ -91,12 +90,6 @@ def lstm_reference(input, hidden_input, cell_input,
     )
 
 
-def old_lstm_reference(
-        input, seq_lengths, gates_w, gates_b, hidden_init, cell_init):
-    output, last_output, cell_states, last_state = lstm_reference(
-        input, hidden_init, cell_init, gates_w, gates_b, seq_lengths)
-    return (output, last_output, last_state)
-
 
 def milstm_reference(
         input,
@@ -160,8 +153,7 @@ def lstm_with_attention_reference(
     weighted_decoder_hidden_state_t_w,
     weighted_decoder_hidden_state_t_b,
     attention_v,
-    slice_start,
-    slice_end
+    attention_zeros,
 ):
     encoder_outputs = np.transpose(encoder_outputs_transposed, axes=[2, 0, 1])
     decoder_input_length = input.shape[0]
@@ -248,8 +240,7 @@ def lstm_with_recurrent_attention_reference(
     weighted_decoder_hidden_state_t_w,
     weighted_decoder_hidden_state_t_b,
     attention_v,
-    slice_start,
-    slice_end
+    attention_zeros,
 ):
     encoder_outputs = np.transpose(encoder_outputs_transposed, axes=[2, 0, 1])
     decoder_input_length = input.shape[0]
@@ -335,71 +326,30 @@ class RecurrentNetworkTest(hu.HypothesisTestCase):
     @given(t=st.integers(1, 4),
            n=st.integers(1, 5),
            d=st.integers(1, 5))
-    def test_lstm_new(self, t, n, d):
+    def test_lstm(self, t, n, d):
         for outputs_with_grads in [[0], [1], [0, 1, 2, 3]]:
-            model = CNNModelHelper(name='external')
+            self.lstm(
+                recurrent.LSTM, t, n, d, lstm_reference, outputs_with_grads)
 
-            def create_lstm(
-                    model, input_blob, seq_lengths,
-                    init, dim_in, dim_out, scope):
-                recurrent.LSTM(
-                    model, input_blob, seq_lengths, init,
-                    dim_in, dim_out, scope="external/recurrent",
-                    outputs_with_grads=outputs_with_grads)
-
-            self.lstm(model, create_lstm, t, n, d, lstm_reference,
-                      gradients_to_check=[0, 1, 2, 3, 4],
-                      outputs_to_check=[0, 1, 2, 3],
-                      outputs_with_grads=outputs_with_grads)
-
-    @given(t=st.integers(1, 4),
-           n=st.integers(1, 5),
-           d=st.integers(1, 5))
-    def test_lstm_old(self, t, n, d):
-        model = CNNModelHelper(name='external')
-
-        def create_lstm(
-                model, input_blob, seq_lengths, init, dim_in, dim_out, scope):
-            model.LSTM(
-                input_blob, seq_lengths, init,
-                dim_in, dim_out, scope="external/recurrent")
-
-        # CNNModelHelper.LSTM returns only 3 outputs. But the operator itself
-        # returns 5. We ignore the rest.
-        self.lstm(model, create_lstm, t, n, d, old_lstm_reference,
-                  gradients_to_check=[0, 2, 3, 4, 5],
-                  outputs_to_check=[0, 3, 4])
 
     @given(t=st.integers(1, 4),
            n=st.integers(1, 5),
            d=st.integers(1, 5))
     def test_milstm(self, t, n, d):
         for outputs_with_grads in [[0], [1], [0, 1, 2, 3]]:
-            model = CNNModelHelper(name='external')
+            self.lstm(
+                recurrent.MILSTM, t, n, d, milstm_reference, outputs_with_grads)
 
-            def create_milstm(
-                    model, input_blob, seq_lengths,
-                    init, dim_in, dim_out, scope):
-                recurrent.MILSTM(
-                    model, input_blob, seq_lengths, init,
-                    dim_in, dim_out, scope="external/recurrent",
-                    outputs_with_grads=outputs_with_grads)
-
-            self.lstm(model, create_milstm, t, n, d, milstm_reference,
-                      gradients_to_check=[0, 1, 2, 3, 4],
-                      outputs_to_check=[0, 1, 2, 3],
-                      outputs_with_grads=outputs_with_grads)
-
-    @debug
-    def lstm(self, model, create_lstm, t, n, d, ref, gradients_to_check,
-             outputs_to_check=None, outputs_with_grads=(0,)):
+    def lstm(self, create_lstm, t, n, d, ref, outputs_with_grads):
+        model = CNNModelHelper(name='external')
         input_blob, seq_lengths, hidden_init, cell_init = (
             model.net.AddExternalInputs(
                 'input_blob', 'seq_lengths', 'hidden_init', 'cell_init'))
 
         create_lstm(
             model, input_blob, seq_lengths, (hidden_init, cell_init),
-            d, d, scope="external/recurrent")
+            d, d, scope="external/recurrent",
+            outputs_with_grads=outputs_with_grads)
 
         op = model.net._net.op[-1]
 
@@ -420,7 +370,9 @@ class RecurrentNetworkTest(hu.HypothesisTestCase):
         workspace.FeedBlob("hidden_init", generate_random_state(n, d))
         workspace.FeedBlob("cell_init", generate_random_state(n, d))
         workspace.FeedBlob(
-            "seq_lengths", np.random.randint(1, t + 1, size=(n,)).astype(np.int32))
+            "seq_lengths",
+            np.random.randint(1, t + 1, size=(n,)).astype(np.int32)
+        )
         inputs = [workspace.FetchBlob(name) for name in op.input]
 
         print(op.input)
@@ -431,11 +383,11 @@ class RecurrentNetworkTest(hu.HypothesisTestCase):
             op,
             inputs,
             ref,
-            outputs_to_check=outputs_to_check,
+            outputs_to_check=range(4),
         )
 
         # Checking for input, gates_t_w and gates_t_b gradients
-        for param in gradients_to_check:
+        for param in range(5):
             self.assertGradientChecks(
                 device_option=hu.cpu_do,
                 op=op,
@@ -595,7 +547,6 @@ class RecurrentNetworkTest(hu.HypothesisTestCase):
                 encoder_outputs=encoder_outputs,
                 decoder_input_dim=decoder_state_dim,
                 decoder_state_dim=decoder_state_dim,
-                batch_size=batch_size,
                 scope='external/LSTMWithAttention',
             )
             op = model.net._net.op[-1]
@@ -647,7 +598,6 @@ class RecurrentNetworkTest(hu.HypothesisTestCase):
             np.random.randn(
                 1, batch_size, encoder_output_dim).astype(np.float32)
         )
-
         inputs = [workspace.FetchBlob(name) for name in op.input]
         self.assertReferenceChecks(
             device_option=gc,
@@ -660,9 +610,7 @@ class RecurrentNetworkTest(hu.HypothesisTestCase):
         )
         gradients_to_check = [
             index for (index, input_name) in enumerate(op.input)
-            if input_name != "decoder_input_lengths" and
-            input_name != "external/LSTMWithAttention/slice_start" and
-            input_name != "external/LSTMWithAttention/slice_end"
+            if input_name != "decoder_input_lengths"
         ]
         for param in gradients_to_check:
             self.assertGradientChecks(
@@ -721,7 +669,6 @@ class RecurrentNetworkTest(hu.HypothesisTestCase):
                 encoder_outputs=encoder_outputs,
                 decoder_input_dim=decoder_state_dim,
                 decoder_state_dim=decoder_state_dim,
-                batch_size=batch_size,
                 scope='external/LSTMWithAttention',
                 attention_type=AttentionType.Recurrent
             )
@@ -787,9 +734,7 @@ class RecurrentNetworkTest(hu.HypothesisTestCase):
         )
         gradients_to_check = [
             index for (index, input_name) in enumerate(op.input)
-            if input_name != "decoder_input_lengths" and
-            input_name != "external/LSTMWithAttention/slice_start" and
-            input_name != "external/LSTMWithAttention/slice_end"
+            if input_name != "decoder_input_lengths"
         ]
         for param in gradients_to_check:
             self.assertGradientChecks(

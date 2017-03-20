@@ -279,7 +279,6 @@ def LSTMWithAttention(
     encoder_outputs,
     decoder_input_dim,
     decoder_state_dim,
-    batch_size,
     scope,
     attention_type=AttentionType.Regular,
     outputs_with_grads=(0, 4),
@@ -319,8 +318,6 @@ def LSTMWithAttention(
     decoder_input_dim: input dimention (last dimension on decoder_inputs)
 
     decoder_state_dim: size of hidden states of LSTM
-
-    batch_size: batch size
 
     attention_type: One of: AttentionType.Regular, AttentionType.Recurrent.
     Determines which type of attention mechanism to use.
