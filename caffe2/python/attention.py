@@ -35,7 +35,7 @@ def _calc_weighted_context(
             attention_weighted_encoder_context,
             s(scope, 'attention_weighted_encoder_context_old_shape')
         ],
-        shape=[-1, encoder_output_dim],
+        shape=[1, -1, encoder_output_dim],
     )
     return attention_weighted_encoder_context
 
@@ -198,6 +198,7 @@ def apply_recurrent_attention(
         scope=scope
     )
 
+    # [batch_size, encoder_length, 1]
     attention_weights_3d = _calc_attention_weights(
         model=model,
         attention_logits_transposed=attention_logits_transposed,
@@ -212,7 +213,7 @@ def apply_recurrent_attention(
         attention_weights_3d=attention_weights_3d,
         scope=scope
     )
-    return attention_weighted_encoder_context
+    return attention_weighted_encoder_context, attention_weights_3d
 
 
 def apply_regular_attention(
@@ -254,6 +255,7 @@ def apply_regular_attention(
         scope=scope
     )
 
+    # [batch_size, encoder_length, 1]
     attention_weights_3d = _calc_attention_weights(
         model=model,
         attention_logits_transposed=attention_logits_transposed,
@@ -268,4 +270,4 @@ def apply_regular_attention(
         attention_weights_3d=attention_weights_3d,
         scope=scope
     )
-    return attention_weighted_encoder_context
+    return attention_weighted_encoder_context, attention_weights_3d

@@ -111,6 +111,7 @@ class EnforceNotMet : public std::exception {
  private:
   vector<string> msg_stack_;
   string full_msg_;
+  string stack_trace_;
 };
 
 #define CAFFE_ENFORCE(condition, ...)                                         \
@@ -158,7 +159,12 @@ struct EnforceOK {};
 
 class EnforceFailMessage {
  public:
+#ifdef _MSC_VER
+  // MSVC + NVCC ignores constexpr and will issue a warning if included.
+  /* implicit */ EnforceFailMessage(EnforceOK) : msg_(nullptr) {}
+#else
   constexpr /* implicit */ EnforceFailMessage(EnforceOK) : msg_(nullptr) {}
+#endif
   EnforceFailMessage(EnforceFailMessage&&) = default;
   EnforceFailMessage(const EnforceFailMessage&) = delete;
   EnforceFailMessage& operator=(EnforceFailMessage&&) = delete;
