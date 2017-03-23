@@ -31,7 +31,7 @@ class TestReduceFrontSum(hu.HypothesisTestCase):
         self.assertGradientChecks(
             device, op, [in_data], 0, [0], stepsize=1e-2, threshold=1e-2)
 
-    @given(num_reduce_dim=st.integers(1, 3), **hu.gcs)
+    @given(num_reduce_dim=st.integers(1, 4), **hu.gcs)
     def test_reduce_front_sum(self, num_reduce_dim, gc, dc):
         X = np.random.rand(7, 4, 3, 5).astype(np.float32)
 
