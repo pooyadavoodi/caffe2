@@ -53,7 +53,6 @@ def lstm_unit(hidden_t_prev, cell_t_prev, gates,
     cell_t = cell_t.reshape(1, N, D)
     return hidden_t, cell_t
 
-
 def lstm_reference(input, hidden_input, cell_input,
                    gates_w, gates_b, seq_lengths, forget_bias):
     T = input.shape[0]
@@ -74,6 +73,44 @@ def lstm_reference(input, hidden_input, cell_input,
         cell_t_prev = cell[t].reshape(1, N, D)
         gates = np.dot(hidden_t_prev, gates_w.T) + gates_b
         gates = gates + input_t
+        hidden_t, cell_t = lstm_unit(
+            hidden_t_prev,
+            cell_t_prev,
+            gates,
+            seq_lengths,
+            t,
+            forget_bias,
+        )
+        hidden[t + 1] = hidden_t
+        cell[t + 1] = cell_t
+    return (
+        hidden[1:],
+        hidden[-1].reshape(1, N, D),
+        cell[1:],
+        cell[-1].reshape(1, N, D)
+    )
+
+
+def lstm_rnn_reference(input, input_w, input_b, hidden_input, cell_input,
+                   gates_w, gates_b, seq_lengths, forget_bias):
+    T = input.shape[0]
+    N = input.shape[1]
+#    G = input.shape[2]
+    D = hidden_input.shape[hidden_input.ndim - 1]
+    hidden = np.zeros(shape=(T + 1, N, D))
+    cell = np.zeros(shape=(T + 1, N, D))
+    assert hidden.shape[0] == T + 1
+    assert cell.shape[0] == T + 1
+    assert hidden.shape[1] == N
+    assert cell.shape[1] == N
+    cell[0, :, :] = cell_input
+    hidden[0, :, :] = hidden_input
+    for t in range(T):
+        input_t = input[t].reshape(1, N, D)
+        hidden_t_prev = hidden[t].reshape(1, N, D)
+        cell_t_prev = cell[t].reshape(1, N, D)
+        gates = np.dot(hidden_t_prev, gates_w.T) + gates_b + \
+                np.dot(input_t, input_w.T) + input_b
         hidden_t, cell_t = lstm_unit(
             hidden_t_prev,
             cell_t_prev,
@@ -375,6 +412,107 @@ class RecurrentNetworkTest(hu.HypothesisTestCase):
             self.lstm(
                 recurrent.MILSTM, t, n, d, ref,
                 outputs_with_grads, memory_optim, forget_bias)
+
+    @given(t=st.integers(1, 4),
+           n=st.integers(1, 5),
+           d=st.integers(1, 5),
+           memory_optim=st.booleans(),
+           **hu.gcs)
+    def test_lstm_rnn(self, t, n, d, memory_optim, gc, dc):
+        for outputs_with_grads in [[0], [1], [0, 1, 2, 3]]:
+            def ref(*args):
+                return lstm_rnn_reference(*args, forget_bias=0.0)
+            self.lstm_rnn(
+                recurrent.LSTM, t, n, d, ref, outputs_with_grads,
+                memory_optim, gc, dc)
+    def lstm_rnn(self, create_lstm, t, n, d, ref,
+             outputs_with_grads, memory_optim, gc, dc, forget_bias=0.0):
+        model = CNNModelHelper(name='external')
+        input_blob, seq_lengths, hidden_init, cell_init = (
+            model.net.AddExternalInputs(
+                'input_blob', 'seq_lengths', 'hidden_init', 'cell_init'))
+        with core.DeviceScope(gc):
+          create_lstm(
+              model, input_blob, seq_lengths, (hidden_init, cell_init),
+              d, d, scope="external/recurrent",
+              outputs_with_grads=outputs_with_grads,
+              memory_optimization=memory_optim,
+              forget_bias=forget_bias,
+          )
+        workspace.RunNetOnce(model.param_init_net)
+
+        def generate_random_state(n, d):
+            ndim = int(np.random.choice(3, 1)) + 1
+            if ndim == 1:
+                return np.random.randn(1, n, d).astype(np.float32)
+            random_state = np.random.randn(n, d).astype(np.float32)
+            if ndim == 3:
+                random_state = random_state.reshape([1, n, d])
+            return random_state
+
+        workspace.FeedBlob(
+            str(input_blob), np.random.randn(t, n, d).astype(np.float32))
+        workspace.FeedBlob("hidden_init", generate_random_state(n, d))
+        workspace.FeedBlob("cell_init", generate_random_state(n, d))
+        workspace.FeedBlob(
+            "seq_lengths",
+            np.random.randint(1, t + 1, size=(n,)).astype(np.int32)
+        )
+        inputs = [(name, workspace.FetchBlob(name)) for name in
+                    [
+                        "input_blob",
+                        "external/recurrent/i2h_w",
+                        "external/recurrent/i2h_b",
+                        "hidden_init",
+                        "cell_init",
+                        "external/recurrent/gates_t_w",
+                        "external/recurrent/gates_t_b",
+                        "seq_lengths"
+                    ]
+                 ]
+
+        outputs_to_check=np.array([
+          "external/recurrent/hidden_t_all",
+          "external/recurrent/hidden_t_last",
+          "external/recurrent/cell_t_all",
+          "external/recurrent/cell_t_last",
+          ])
+        self.assertReferenceChecksNet(
+            device_option=gc,
+            net=model.net,
+            inputs=inputs,
+            reference=ref,
+            outputs_to_check=outputs_to_check
+        )
+           
+#        workspace.ResetWorkspace()
+#        labels=model.net.AddExternalInputs('labels')
+#        inputs.append((labels, np.random.randn(t*n, 1).astype(np.int)))
+#        outputs_to_check[0], _ = model.net.Reshape(
+#            [outputs_to_check[0]],
+#            [
+#                str(outputs_to_check[0]),
+#                'output_old_shape',
+#            ],
+#            shape=[-1, d],
+#        )
+#        _, loss = model.SoftmaxWithLoss([outputs_to_check[0], labels], ["pred", "loss"])
+#
+#        with open("model.pbtxt", "w") as f:
+#          f.write(str(model.net.Proto()))
+#        with open("model_init.pbtxt", "w") as f:
+#          f.write(str(model.param_init_net.Proto()))
+#
+#        self.assertGradientChecksNet(
+#            device_option=hu.cpu_do,
+#            net=model.net,
+#            inputs=inputs,
+#            input_to_check="input_blob",
+#            #outputs_with_grads=list(outputs_to_check[outputs_with_grads]),
+#            outputs_with_grads=[loss],
+#            threshold=0.01,
+#            stepsize=0.005,
+#        )
 
     def lstm(self, create_lstm, t, n, d, ref,
              outputs_with_grads, memory_optim, forget_bias=0.0):
@@ -1036,3 +1174,7 @@ class RecurrentNetworkTest(hu.HypothesisTestCase):
             workspace.FetchBlob(output_state_all),
             workspace.FetchBlob(output_states_2),
         )
+
+if __name__ == "__main__":
+  import unittest
+  unittest.main()

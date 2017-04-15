@@ -307,6 +307,74 @@ class HypothesisTestCase(test_util.TestCase):
             dc.CheckSimple(op, inputs, outputs_to_check, input_device_options)
         )
 
+    def assertGradientChecksNet(
+        self,
+        device_option,
+        net,
+        inputs,
+        input_to_check,
+        outputs_with_grads,
+        grad_ops=None,
+        threshold=0.005,
+        stepsize=0.05,
+        input_device_options=None,
+    ):
+        
+        gc=gradient_checker.NetGradientChecker
+        gc.Check(net, outputs_with_grads, dict(inputs), 
+            input_to_check, step_size=stepsize, threshold=threshold
+        )
+
+    def _assertGradReferenceChecksNet(
+        self,
+        op,
+        inputs,
+        ref_outputs,
+        output_to_grad,
+        grad_reference,
+        threshold=1e-4,
+    ):
+        grad_blob_name = output_to_grad + '_grad'
+        grad_ops, grad_map = core.GradientRegistry.GetBackwardPass(
+            [op], {output_to_grad: grad_blob_name})
+        output_grad = workspace.FetchBlob(output_to_grad)
+        grad_ref_outputs = grad_reference(output_grad, ref_outputs, inputs)
+        workspace.FeedBlob(grad_blob_name, workspace.FetchBlob(output_to_grad))
+        workspace.RunOperatorsOnce(grad_ops)
+
+        self.assertEqual(len(grad_ref_outputs), len(inputs))
+        for (n, ref) in zip(op.input, grad_ref_outputs):
+            grad_names = grad_map.get(n)
+            if not grad_names:
+                # no grad for this input
+                self.assertIsNone(ref)
+            else:
+                if isinstance(grad_names, core.BlobReference):
+                    # dense gradient
+                    ref_vals = ref
+                    ref_indices = None
+                    val_name = grad_names
+                else:
+                    # sparse gradient
+                    ref_vals, ref_indices = ref
+                    val_name = grad_names.values
+                vals = workspace.FetchBlob(str(val_name))
+                np.testing.assert_allclose(
+                    vals,
+                    ref_vals,
+                    atol=threshold,
+                    rtol=threshold,
+                    err_msg='Gradient {0} is not matching the reference'.format(
+                        val_name,
+                    ),
+                )
+                if ref_indices is not None:
+                    indices = workspace.FetchBlob(str(grad_names.indices))
+                    np.testing.assert_allclose(indices, ref_indices,
+                                               atol=1e-4, rtol=1e-4)
+
+
+
     def assertGradientChecks(
         self,
         device_option,
@@ -442,6 +510,83 @@ class HypothesisTestCase(test_util.TestCase):
             logging.warning(str(e))
             if os.getenv('CAFFE2_ASSERT_SHAPEINFERENCE') == '1':
                 raise e
+
+    def assertReferenceChecksNet(
+        self,
+        device_option,
+        net,
+        inputs,
+        reference,
+        outputs_to_check,
+        input_device_options=None,
+        threshold=1e-4,
+        output_to_grad=None,
+        grad_reference=None,
+        atol=None,
+    ):
+        if input_device_options is None:
+            input_device_options = {}
+
+#        op = copy.deepcopy(op)
+#        op.device_option.CopyFrom(device_option)
+        print("device_option", device_option)
+
+        with temp_workspace():
+            for (n, b) in inputs:
+                print("n", n)
+                print("device_option", input_device_options.get(n, device_option))
+                workspace.FeedBlob(
+                    n,
+                    b,
+                    device_option=input_device_options.get(n, device_option)
+                )
+                print("Input", n, input_device_options.get(n, device_option))
+#            net = core.Net("opnet")
+#            net.Proto().op.extend([op])
+            test_shape_inference = False
+            try:
+                (shapes, types) = workspace.InferShapesAndTypes([net])
+                test_shape_inference = True
+            except RuntimeError as e:
+                # Temporarily catch runtime errors when inferring shape
+                # and type info
+                logging.warning(str(e))
+                if os.getenv('CAFFE2_ASSERT_SHAPEINFERENCE') == '1':
+                    raise e
+            workspace.RunNetOnce(net)
+            reference_outputs = reference(*[i[1] for i in inputs])
+            if not (isinstance(reference_outputs, tuple) or
+                    isinstance(reference_outputs, list)):
+                raise RuntimeError(
+                    "You are providing a wrong reference implementation. A "
+                    "proper one should return a tuple/list of numpy arrays.")
+            self.assertEqual(len(reference_outputs), len(outputs_to_check))
+            outs = []
+            for (output_blob_name, ref) in zip(outputs_to_check, reference_outputs):
+                output = workspace.FetchBlob(output_blob_name)
+                if output.dtype.kind in ('S', 'O'):
+                    np.testing.assert_array_equal(output, ref)
+                else:
+                    if atol is None:
+                        atol = threshold
+                    np.testing.assert_allclose(
+                        output, ref, atol=atol, rtol=threshold,
+                        err_msg=(
+                            'Output {0} is not matching the reference'.format(
+                                output_blob_name,
+                            )),
+                    )
+                if test_shape_inference:
+                    self._assertInferTensorChecks(
+                        output_blob_name, shapes, types, output)
+                outs.append(output)
+#            if grad_reference and output_to_grad:
+#                with core.DeviceScope(device_option):
+#                    self._assertGradReferenceChecks(
+#                        op, inputs, reference_outputs,
+#                        output_to_grad, grad_reference)
+            return outs
+
 
     def assertReferenceChecks(
         self,

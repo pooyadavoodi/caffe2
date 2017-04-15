@@ -13,11 +13,13 @@ class NetGradientChecker(object):
 
         net_copy = net.Clone(net.Name() + "_copy")
 
+        print("outputs_with_grad: {}".format(outputs_with_grad))
         grad_map = net_copy.AddGradientOperators(outputs_with_grad)
         for name, value in input_values.items():
             workspace.blobs[name] = value
 
         def GetLoss(new_value):
+            print("new_value", new_value)
             workspace.blobs[input_to_check] = new_value
             workspace.RunNetOnce(net_copy)
             return sum([
@@ -35,13 +37,20 @@ class NetGradientChecker(object):
 
         grad_estimate = np.zeros_like(input_values[input_to_check])
         for dim in range(input_values[input_to_check].size):
+            print("dimi", dim)
             pos_loss = GetLoss(GetValue(dim, step_size))
             neg_loss = GetLoss(GetValue(dim, -step_size))
+            print("grad_estimate", grad_estimate)
+            print("pos_loss", pos_loss)
+            print("neg_loss", neg_loss)
+            print("pos_loss - neg_loss", pos_loss - neg_loss)
             grad_estimate.flat[dim] = (pos_loss - neg_loss) / step_size / 2
 
         err_msg = "Error in gradient check for net_copy {}: {}".format(
             net.Name(), net.Proto())
 
+        print("analitic_grad", analitic_grad)
+        print("grad_estimate", grad_estimate)
         np.testing.assert_allclose(
             analitic_grad, grad_estimate,
             atol=threshold, rtol=threshold,
