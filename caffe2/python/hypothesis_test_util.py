@@ -529,12 +529,9 @@ class HypothesisTestCase(test_util.TestCase):
 
 #        op = copy.deepcopy(op)
 #        op.device_option.CopyFrom(device_option)
-        print("device_option", device_option)
 
         with temp_workspace():
             for (n, b) in inputs:
-                print("n", n)
-                print("device_option", input_device_options.get(n, device_option))
                 workspace.FeedBlob(
                     n,
                     b,

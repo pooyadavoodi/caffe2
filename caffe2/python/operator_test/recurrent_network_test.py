@@ -179,6 +179,97 @@ def milstm_reference(
         cell[-1].reshape(1, N, D)
     )
 
+def lstm_rnn_with_attention_reference(
+    input,
+    input_w,
+    input_b,
+    initial_hidden_state,
+    initial_cell_state,
+    initial_attention_weighted_encoder_context,
+    encoder_outputs,
+    weighted_encoder_outputs_w,
+    weighted_encoder_outputs_b,
+    gates_w,
+    gates_b,
+    decoder_input_lengths,
+    weighted_decoder_hidden_state_t_w,
+    weighted_decoder_hidden_state_t_b,
+    attention_v,
+    attention_zeros,
+):
+    encoder_outputs_transposed = np.transpose(encoder_outputs, axes=[1, 2, 0])
+    decoder_input_length = input.shape[0]
+    batch_size = input.shape[1]
+    decoder_input_dim = input.shape[2]
+    decoder_state_dim = initial_hidden_state.shape[2]
+    encoder_output_dim = encoder_outputs.shape[2]
+    weighted_encoder_outputs=np.dot(
+          encoder_outputs, weighted_encoder_outputs_w.T) + \
+          weighted_encoder_outputs_b
+    hidden = np.zeros(
+        shape=(decoder_input_length + 1, batch_size, decoder_state_dim))
+    cell = np.zeros(
+        shape=(decoder_input_length + 1, batch_size, decoder_state_dim))
+    attention_weighted_encoder_context = np.zeros(
+        shape=(decoder_input_length + 1, batch_size, encoder_output_dim))
+    cell[0, :, :] = initial_cell_state
+    hidden[0, :, :] = initial_hidden_state
+    attention_weighted_encoder_context[0, :, :] = (
+        initial_attention_weighted_encoder_context
+    )
+    for t in range(decoder_input_length):
+        input_t = input[t].reshape(1, batch_size, decoder_input_dim)
+        hidden_t_prev = hidden[t].reshape(1, batch_size, decoder_state_dim)
+        cell_t_prev = cell[t].reshape(1, batch_size, decoder_state_dim)
+        attention_weighted_encoder_context_t_prev = (
+            attention_weighted_encoder_context[t].reshape(
+                1, batch_size, encoder_output_dim)
+        )
+        gates_input = np.concatenate(
+            (hidden_t_prev, attention_weighted_encoder_context_t_prev),
+            axis=2,
+        )
+        gates = np.dot(gates_input, gates_w.T) + gates_b + \
+                np.dot(input_t, input_w.T) + input_b
+        hidden_t, cell_t = lstm_unit(hidden_t_prev, cell_t_prev, gates,
+                                     decoder_input_lengths, t)
+        hidden[t + 1] = hidden_t
+        cell[t + 1] = cell_t
+        weighted_hidden_t = np.dot(
+            hidden_t,
+            weighted_decoder_hidden_state_t_w.T,
+        ) + weighted_decoder_hidden_state_t_b
+        attention_v = attention_v.reshape([-1])
+        attention_logits_t = np.sum(
+            attention_v * np.tanh(weighted_encoder_outputs + weighted_hidden_t),
+            axis=2,
+        )
+        attention_logits_t_exp = np.exp(attention_logits_t)
+        attention_weights_t = (
+            attention_logits_t_exp /
+            np.sum(attention_logits_t_exp, axis=0).reshape([1, -1])
+        )
+        attention_weighted_encoder_context[t + 1] = np.sum(
+            (
+                encoder_outputs *
+                attention_weights_t.reshape([-1, batch_size, 1])
+            ),
+            axis=0,
+        )
+    return (
+        hidden[1:],
+        hidden[-1].reshape(1, batch_size, decoder_state_dim),
+        cell[1:],
+        cell[-1].reshape(1, batch_size, decoder_state_dim),
+        attention_weighted_encoder_context[1:],
+        attention_weighted_encoder_context[-1].reshape(
+            1,
+            batch_size,
+            encoder_output_dim,
+        )
+    )
+
+
 
 def lstm_with_attention_reference(
     input,
@@ -201,6 +292,9 @@ def lstm_with_attention_reference(
     decoder_input_dim = input.shape[2]
     decoder_state_dim = initial_hidden_state.shape[2]
     encoder_output_dim = weighted_encoder_outputs.shape[2]
+    print("T", decoder_input_length)
+    print("N", batch_size)
+    print("D", decoder_input_dim)
     hidden = np.zeros(
         shape=(decoder_input_length + 1, batch_size, decoder_state_dim))
     cell = np.zeros(
@@ -234,6 +328,7 @@ def lstm_with_attention_reference(
             hidden_t,
             weighted_decoder_hidden_state_t_w.T,
         ) + weighted_decoder_hidden_state_t_b
+        print("attention_v", attention_v.shape)
         attention_v = attention_v.reshape([-1])
         attention_logits_t = np.sum(
             attention_v * np.tanh(weighted_encoder_outputs + weighted_hidden_t),
@@ -427,11 +522,11 @@ class RecurrentNetworkTest(hu.HypothesisTestCase):
                 memory_optim, gc, dc)
     def lstm_rnn(self, create_lstm, t, n, d, ref,
              outputs_with_grads, memory_optim, gc, dc, forget_bias=0.0):
-        model = CNNModelHelper(name='external')
-        input_blob, seq_lengths, hidden_init, cell_init = (
-            model.net.AddExternalInputs(
-                'input_blob', 'seq_lengths', 'hidden_init', 'cell_init'))
         with core.DeviceScope(gc):
+          model = CNNModelHelper(name='external')
+          input_blob, seq_lengths, hidden_init, cell_init = (
+              model.net.AddExternalInputs(
+                  'input_blob', 'seq_lengths', 'hidden_init', 'cell_init'))
           create_lstm(
               model, input_blob, seq_lengths, (hidden_init, cell_init),
               d, d, scope="external/recurrent",
@@ -713,6 +808,147 @@ class RecurrentNetworkTest(hu.HypothesisTestCase):
            decoder_state_dim=st.integers(1, 3),
            batch_size=st.integers(1, 3),
            **hu.gcs)
+    def test_lstm_rnn_with_attention(
+        self,
+        encoder_output_length,
+        encoder_output_dim,
+        decoder_input_length,
+        decoder_state_dim,
+        batch_size,
+        gc,
+        dc,
+    ):
+        with core.DeviceScope(gc):
+            model = CNNModelHelper(name="external")
+            (
+                encoder_outputs,
+                decoder_inputs,
+                decoder_input_lengths,
+                initial_decoder_hidden_state,
+                initial_decoder_cell_state,
+                initial_attention_weighted_encoder_context,
+            ) = model.net.AddExternalInputs(
+                "encoder_outputs",
+                "decoder_inputs",
+                "decoder_input_lengths",
+                "initial_decoder_hidden_state",
+                "initial_decoder_cell_state",
+                "initial_attention_weighted_encoder_context",
+            )
+            recurrent.LSTMWithAttention(
+                model=model,
+                decoder_inputs=decoder_inputs,
+                decoder_input_lengths=decoder_input_lengths,
+                initial_decoder_hidden_state=initial_decoder_hidden_state,
+                initial_decoder_cell_state=initial_decoder_cell_state,
+                initial_attention_weighted_encoder_context=(
+                    initial_attention_weighted_encoder_context
+                ),
+                encoder_output_dim=encoder_output_dim,
+                encoder_outputs=encoder_outputs,
+                decoder_input_dim=decoder_state_dim,
+                decoder_state_dim=decoder_state_dim,
+                scope='external/LSTMWithAttention',
+            )
+        workspace.RunNetOnce(model.param_init_net)
+
+        workspace.FeedBlob(
+            str(decoder_inputs),
+            np.random.randn(
+                decoder_input_length,
+                batch_size,
+                decoder_state_dim,
+            ).astype(np.float32))
+        workspace.FeedBlob(
+            "encoder_outputs",
+            np.random.randn(
+                encoder_output_length,
+                batch_size,
+                encoder_output_dim,
+            ).astype(np.float32),
+        )
+        workspace.FeedBlob(
+            decoder_input_lengths,
+            np.random.randint(
+                0,
+                decoder_input_length + 1,
+                size=(batch_size,)
+            ).astype(np.int32))
+        workspace.FeedBlob(
+            initial_decoder_hidden_state,
+            np.random.randn(1, batch_size, decoder_state_dim).astype(np.float32)
+        )
+        workspace.FeedBlob(
+            initial_decoder_cell_state,
+            np.random.randn(1, batch_size, decoder_state_dim).astype(np.float32)
+        )
+        workspace.FeedBlob(
+            initial_attention_weighted_encoder_context,
+            np.random.randn(
+                1, batch_size, encoder_output_dim).astype(np.float32)
+        )
+
+        inputs = [(name, workspace.FetchBlob(name)) for name in
+                    [
+                      "decoder_inputs",
+                      "external/LSTMWithAttention/i2h_w",
+                      "external/LSTMWithAttention/i2h_b",
+                      "initial_decoder_hidden_state",
+                      "initial_decoder_cell_state",
+                      "initial_attention_weighted_encoder_context",
+                      "encoder_outputs",
+                      "external/LSTMWithAttention/weighted_encoder_outputs_w",
+                      "external/LSTMWithAttention/weighted_encoder_outputs_b",
+                      "external/LSTMWithAttention/gates_t_w",
+                      "external/LSTMWithAttention/gates_t_b",
+                      "decoder_input_lengths",
+                      "external/LSTMWithAttention/weighted_decoder_hidden_state_w",
+                      "external/LSTMWithAttention/weighted_decoder_hidden_state_b",
+                      "external/LSTMWithAttention/attention_v",
+                      "external/LSTMWithAttention/attention_zeros",
+                    ]
+                 ]
+        outputs_to_check=np.array([
+          "external/LSTMWithAttention/hidden_t_all",
+          "external/LSTMWithAttention/hidden_t_last",
+          "external/LSTMWithAttention/cell_t_all",
+          "external/LSTMWithAttention/cell_t_last",
+          "external/LSTMWithAttention/attention_weighted_encoder_context_all",
+          "external/LSTMWithAttention/attention_weighted_encoder_context_last",
+        ])
+
+        self.assertReferenceChecksNet(
+            device_option=gc,
+            net=model.net,
+            inputs=inputs,
+            reference=lstm_rnn_with_attention_reference,
+            grad_reference=None,
+            output_to_grad=None,
+            outputs_to_check=outputs_to_check,
+        )
+#        gradients_to_check = [
+#            index for (index, input_name) in enumerate(op.input)
+#            if input_name != "decoder_input_lengths"
+#        ]
+#        for param in gradients_to_check:
+#            self.assertGradientChecks(
+#                device_option=gc,
+#                op=op,
+#                inputs=inputs,
+#                outputs_to_check=param,
+#                outputs_with_grads=[0, 4],
+#                threshold=0.01,
+#                stepsize=0.001,
+#            )
+
+
+
+    @given(encoder_output_length=st.integers(1, 3),
+           encoder_output_dim=st.integers(1, 3),
+           decoder_input_length=st.integers(1, 3),
+           decoder_state_dim=st.integers(1, 3),
+           batch_size=st.integers(1, 3),
+           **hu.gcs)
     def test_lstm_with_attention(
         self,
         encoder_output_length,
@@ -805,6 +1041,12 @@ class RecurrentNetworkTest(hu.HypothesisTestCase):
                 1, batch_size, encoder_output_dim).astype(np.float32)
         )
         inputs = [workspace.FetchBlob(name) for name in op.input]
+
+        with open("model.pbtxt", "w") as f:
+          f.write(str(model.net.Proto()))
+        with open("model_init.pbtxt", "w") as f:
+          f.write(str(model.param_init_net.Proto()))
+
         self.assertReferenceChecks(
             device_option=gc,
             op=op,
