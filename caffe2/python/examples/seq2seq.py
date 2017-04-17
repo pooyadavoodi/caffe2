@@ -21,6 +21,8 @@ import caffe2.proto.caffe2_pb2 as caffe2_pb2
 from caffe2.python import core, workspace, recurrent, data_parallel_model
 from caffe2.python.examples import seq2seq_util
 
+import seq2seq_data
+
 import matplotlib.pyplot as plt
 reload(sys)
 sys.setdefaultencoding('utf8')
@@ -49,63 +51,38 @@ PAD = '<PAD>'
 
 
 def prepare_batch(batch):
-    encoder_lengths = [len(entry[0]) for entry in batch]
-    max_encoder_length = max(encoder_lengths)
-    decoder_lengths = []
-    max_decoder_length = max([len(entry[1]) for entry in batch])
+    (source_inputs, source_lengths,
+     target_inputs, target_lengths) = batch
 
-    batch_encoder_inputs = []
-    batch_decoder_inputs = []
-    batch_targets = []
-    batch_target_weights = []
+    # encoder_inputs = reverse(source_inputs)
+    encoder_inputs = np.full(source_inputs.shape, _PAD_ID,
+                             dtype=source_inputs.dtype)
+    for i, (row, length) in enumerate(izip(source_inputs, source_lengths)):
+        encoder_inputs[i, :length] = row[length - 1::-1]
+    encoder_lengths = source_lengths
 
-    for source_seq, target_seq in batch:
-        encoder_pads = (
-            [_PAD_ID] * (max_encoder_length - len(source_seq))
-        )
-        batch_encoder_inputs.append(
-            list(reversed(source_seq)) + encoder_pads
-        )
+    # decoder_inputs = [_GO_ID] + target_inputs
+    decoder_inputs = np.hstack([
+        np.full((len(target_inputs), 1), _GO_ID, dtype=target_inputs.dtype),
+        target_inputs])
+    decoder_lengths = target_lengths + 1
 
-        decoder_pads = (
-            [_PAD_ID] * (max_decoder_length - len(target_seq))
-        )
-        target_seq_with_go_token = [_GO_ID] + target_seq
-        decoder_lengths.append(len(target_seq_with_go_token))
-        batch_decoder_inputs.append(target_seq_with_go_token + decoder_pads)
-
-        target_seq_with_eos = target_seq + [_EOS_ID]
-        targets = target_seq_with_eos + decoder_pads
-        batch_targets.append(targets)
-
-        if len(source_seq) + len(target_seq) == 0:
-            target_weights = [0] * len(targets)
-        else:
-            target_weights = [
-                1 if target != _PAD_ID else 0
-                for target in targets
-            ]
-        batch_target_weights.append(target_weights)
+    # targets = target_inputs + [_EOS_ID]
+    targets = np.hstack([
+        target_inputs,
+        np.full((len(target_inputs), 1), _PAD_ID, dtype=target_inputs.dtype)])
+    target_weights = np.zeros(targets.shape, dtype=np.float32)
+    for i, length in enumerate(target_lengths):
+        targets[i, length] = _EOS_ID
+        target_weights[i, :length] = 1
 
     return Batch(
-        encoder_inputs=np.array(
-            batch_encoder_inputs,
-            dtype=np.int32,
-        ).transpose(),
-        encoder_lengths=np.array(encoder_lengths, dtype=np.int32),
-        decoder_inputs=np.array(
-            batch_decoder_inputs,
-            dtype=np.int32,
-        ).transpose(),
-        decoder_lengths=np.array(decoder_lengths, dtype=np.int32),
-        targets=np.array(
-            batch_targets,
-            dtype=np.int32,
-        ).transpose(),
-        target_weights=np.array(
-            batch_target_weights,
-            dtype=np.float32,
-        ).transpose(),
+        encoder_inputs=encoder_inputs.transpose(),
+        encoder_lengths=encoder_lengths,
+        decoder_inputs=decoder_inputs.transpose(),
+        decoder_lengths=decoder_lengths,
+        targets=targets.transpose(),
+        target_weights=target_weights.transpose(),
     )
 
 
@@ -856,97 +833,9 @@ class Seq2SeqModelCaffe2:
         return self.total_loss_scalar()
 
 
-def gen_vocab(corpus, unk_threshold):
-    vocab = collections.defaultdict(lambda: len(vocab))
-    freqs = collections.defaultdict(lambda: 0)
-    # Adding padding tokens to the vocabulary to maintain consistency with IDs
-    vocab[PAD]
-    vocab[GO]
-    vocab[EOS]
-    vocab[UNK]
-
-    with open(corpus) as f:
-        for sentence in f:
-            tokens = sentence.strip().split()
-            for token in tokens:
-                freqs[token] += 1
-    for token, freq in freqs.items():
-        if freq > unk_threshold:
-            # TODO: Add reverse lookup dict when it becomes necessary
-            vocab[token]
-
-    return vocab
-
-
-def get_numberized_sentence(sentence, vocab):
-    numerized_sentence = []
-    for token in sentence.strip().split():
-        if token in vocab:
-            numerized_sentence.append(vocab[token])
-        else:
-            numerized_sentence.append(vocab[UNK])
-    return numerized_sentence
-
-
-def gen_batches(source_corpus, target_corpus, source_vocab, target_vocab,
-                batch_size, max_length):
-    with open(source_corpus) as source, open(target_corpus) as target:
-        parallel_sentences = []
-        for source_sentence, target_sentence in zip(source, target):
-            numerized_source_sentence = get_numberized_sentence(
-                source_sentence,
-                source_vocab,
-            )
-            numerized_target_sentence = get_numberized_sentence(
-                target_sentence,
-                target_vocab,
-            )
-            if (
-                len(numerized_source_sentence) > 0 and
-                len(numerized_target_sentence) > 0 and
-                (
-                    max_length is None or (
-                        len(numerized_source_sentence) <= max_length and
-                        len(numerized_target_sentence) <= max_length
-                    )
-                )
-            ):
-                parallel_sentences.append((
-                    numerized_source_sentence,
-                    numerized_target_sentence,
-                ))
-    parallel_sentences.sort(key=lambda s_t: (len(s_t[0]), len(s_t[1])))
-
-    batches, batch = [], []
-    for sentence_pair in parallel_sentences:
-        batch.append(sentence_pair)
-        if len(batch) >= batch_size:
-            batches.append(batch)
-            batch = []
-    if len(batch) > 0:
-        while len(batch) < batch_size:
-            batch.append(batch[-1])
-        assert len(batch) == batch_size
-        batches.append(batch)
-    random.shuffle(batches)
-    return batches
-
-
 def run_seq2seq_model(args, model_params=None):
-    source_vocab = gen_vocab(args.source_corpus, args.unk_threshold)
-    target_vocab = gen_vocab(args.target_corpus, args.unk_threshold)
-    logger.info('Source vocab size {}'.format(len(source_vocab)))
-    logger.info('Target vocab size {}'.format(len(target_vocab)))
-
-    batches = gen_batches(args.source_corpus, args.target_corpus, source_vocab,
-                          target_vocab, model_params['batch_size'],
-                          args.max_length)
-    logger.info('Number of training batches {}'.format(len(batches)))
-
-    batches_eval = gen_batches(args.source_corpus_eval, args.target_corpus_eval,
-                               source_vocab, target_vocab,
-                               model_params['batch_size'], args.max_length)
-    logger.info('Number of eval batches {}'.format(len(batches_eval)))
+    (source_vocab, target_vocab,
+     train_data, test_data) = seq2seq_data.get_data(args)
 
     with Seq2SeqModelCaffe2(
         model_params=model_params,
@@ -965,7 +854,8 @@ def run_seq2seq_model(args, model_params=None):
         with open("seq2seq_forward.pbtxt", "w") as fid:
             fid.write(str(model_obj.forward_net.Proto()))
 
-        epoch_size = len(batches)
+        epoch_size = sum([len(train_data[key][0]) for key in train_data]) \
+            // args.batch_size
         display_interval=np.ceil(epoch_size / 100.0)
         test_interval=np.ceil(epoch_size / 10.0)
         print("epoch_size: {}".format(epoch_size))
@@ -976,15 +866,14 @@ def run_seq2seq_model(args, model_params=None):
             logger.info('Epoch {}'.format(e))
             total_loss = 0
             epoch_time = 0
-            for i in range(len(batches)):
-                encoder_token_num=0
-                decoder_token_num=0
-                for b in batches[i]:
-                    encoder_token_num += len(b[0])
-                    decoder_token_num += len(b[1])
+            for i, batch in enumerate(seq2seq_data.iterate_epoch(
+                    train_data, args.batch_size, shuffle=True)):
+                encoder_token_num = np.sum(batch[1])
+                decoder_token_num = np.sum(batch[3])
+
                 start_time = timer()
                 loss = model_obj.step(
-                    batch=batches[i],
+                    batch=batch,
                     forward_only=False,
                 )
                 end_time = timer()
@@ -993,10 +882,10 @@ def run_seq2seq_model(args, model_params=None):
                 total_loss += loss
                 if(i % display_interval == 0):
 
-                    encoder_lengths = [len(entry[0]) for entry in batches[i]]
+                    encoder_lengths = batch[1]
                     max_encoder_length = max(encoder_lengths)
                     decoder_lengths = []
-                    max_decoder_length = max([len(entry[1]) for entry in batches[i]])
+                    max_decoder_length = max(batch[3])
 
                     print("Step_time: {} ms".format(int(1000*step_time)))
                     print("Tokens num: {}".format(int(max_encoder_length + max_decoder_length)))
@@ -1009,11 +898,11 @@ def run_seq2seq_model(args, model_params=None):
                 if(i % test_interval == 0):
                     total_test_loss = 0
                     decoder_token_num=0
-                    for i in range(len(batches_eval)):
-                        for b in batches_eval[i]:
-                            decoder_token_num += len(b[1])
+                    for i, batch in enumerate(seq2seq_data.iterate_epoch(
+                            test_data, args.batch_size)):
+                        decoder_token_num += np.sum(batch[3])
                         loss = model_obj.step(
-                            batch=batches_eval[i],
+                            batch=batch,
                             forward_only=True,
                         )
                         total_test_loss += loss
@@ -1052,26 +941,15 @@ def run_seq2seq_rnn_unidirection_with_no_attention(args):
 def main():
     random.seed(31415)
     parser = argparse.ArgumentParser(
-        description='Caffe2: Seq2Seq Training'
-    )
-    parser.add_argument('--source-corpus', type=str, default=None,
-                        help='Path to source corpus in a text file format. Each '
-                        'line in the file should contain a single sentence',
-                        required=True)
-    parser.add_argument('--target-corpus', type=str, default=None,
-                        help='Path to target corpus in a text file format',
-                        required=True)
-    parser.add_argument('--max-length', type=int, default=None,
-                        help='Maximal lengths of train and eval sentences')
+        description='Caffe2: Seq2Seq Training',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    seq2seq_data.addParserArguments(parser)
     parser.add_argument('--batch-size', type=int, default=32,
                         help='Training batch size')
     parser.add_argument('--epochs', type=int, default=10,
                         help='Number of iterations over training data')
     parser.add_argument('--learning-rate', type=float, default=0.5,
                         help='Learning rate')
-    parser.add_argument('--unk-threshold', type=int, default=50,
-                        help='Threshold frequency under which token becomes '
-                        'labeled unknown token')
     parser.add_argument('--max-gradient-norm', type=float, default=1.0,
                         help='Max global norm of gradients at the end of each '
                         'backward pass. We do clipping to match the number.')
@@ -1080,12 +958,6 @@ def main():
                         'in encoder')
     parser.add_argument('--use-attention', action='store_true',
                         help='Set flag to use seq2seq with attention model')
-    parser.add_argument('--source-corpus-eval', type=str, default=None,
-                        help='Path to source corpus for evaluation in a text '
-                        'file format', required=True)
-    parser.add_argument('--target-corpus-eval', type=str, default=None,
-                        help='Path to target corpus for evaluation in a text '
-                        'file format', required=True)
     parser.add_argument('--encoder-cell-num-units', type=int, default=256,
                         help='Number of cell units in the encoder layer')
     parser.add_argument('--decoder-cell-num-units', type=int, default=512,
