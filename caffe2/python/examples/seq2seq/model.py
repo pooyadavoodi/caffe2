@@ -13,7 +13,7 @@ import sys
 from itertools import izip
 
 import caffe2.proto.caffe2_pb2 as caffe2_pb2
-from caffe2.python import core, workspace, recurrent, data_parallel_model
+from caffe2.python import core, workspace, rnn_cell, data_parallel_model
 import util, data
 from caffe2.python.models.seq2seq.seq2seq_model_helper import Seq2SeqModelHelper
 
@@ -129,7 +129,7 @@ class Seq2SeqModelCaffe2:
         dim_out=decoder_num_units
 
         for l in range(num_layers-1):
-            decoder_outputs, _, _, _ = recurrent.LSTM(
+            decoder_outputs, _, _, _ = rnn_cell.LSTM(
                 model=model,
                 input_blob=input_blob,
                 seq_lengths=decoder_lengths,
@@ -146,7 +146,7 @@ class Seq2SeqModelCaffe2:
 
         # Last RNN layer (may be with attention)
         if use_attention == False: 
-            decoder_outputs, _, _, _ = recurrent.LSTM(
+            decoder_outputs, _, _, _ = rnn_cell.LSTM(
                 model=model,
                 input_blob=input_blob,
                 seq_lengths=decoder_lengths,
@@ -161,7 +161,7 @@ class Seq2SeqModelCaffe2:
             (
                 decoder_outputs, _, _, _,
                 attention_weighted_encoder_contexts, _
-            ) = recurrent.LSTMWithAttention(
+            ) = rnn_cell.LSTMWithAttention(
                 model=model,
                 decoder_inputs=input_blob,
                 decoder_input_lengths=decoder_lengths,

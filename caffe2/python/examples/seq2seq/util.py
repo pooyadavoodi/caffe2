@@ -9,7 +9,7 @@ from __future__ import unicode_literals
 
 import caffe2.proto.caffe2_pb2 as caffe2_pb2
 from caffe2.python.cnn import CNNModelHelper
-from caffe2.python import core, workspace, recurrent
+from caffe2.python import core, workspace, rnn_cell
 
 def rnn_unidirectional_encoder(
     model,
@@ -32,7 +32,7 @@ def rnn_unidirectional_encoder(
     final_hidden_states=[]
     final_cell_states=[]
     for l in range(num_layers):
-        outputs, final_hidden_state, _, final_cell_state = recurrent.LSTM(
+        outputs, final_hidden_state, _, final_cell_state = rnn_cell.LSTM(
             model=model,
             input_blob=input_blob,
             seq_lengths=input_lengths,
@@ -79,7 +79,7 @@ def rnn_bidirectional_encoder(
             final_hidden_state_fw,
             _,
             final_cell_state_fw,
-        ) = recurrent.LSTM(
+        ) = rnn_cell.LSTM(
             model=model,
             input_blob=input_blob,
             seq_lengths=input_lengths,
@@ -101,7 +101,7 @@ def rnn_bidirectional_encoder(
             final_hidden_state_bw,
             _,
             final_cell_state_bw,
-        ) = recurrent.LSTM(
+        ) = rnn_cell.LSTM(
             model=model,
             input_blob=reversed_input_blob,
             seq_lengths=input_lengths,
