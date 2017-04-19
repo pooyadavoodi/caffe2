@@ -172,6 +172,7 @@ class Seq2SeqModelCaffe2:
         embeddings,
         embedding_size,
         use_attention,
+        num_layers,
         num_gpus,
         forward_only=False,
     ):
@@ -231,6 +232,7 @@ class Seq2SeqModelCaffe2:
                 embedding_size,
                 encoder_num_units,
                 use_attention,
+                num_layers
             )
             weighted_encoder_outputs = None
         else:
@@ -243,6 +245,169 @@ class Seq2SeqModelCaffe2:
             final_encoder_hidden_state,
             final_encoder_cell_state,
             encoder_output_dim,
+        )
+
+    def _build_embedding_decoder(
+        self,
+        model,
+        decoder_inputs,
+        decoder_lengths,
+        encoder_outputs,
+        final_encoder_hidden_states,
+        final_encoder_cell_states,
+        encoder_output_dim,
+        use_attention,
+        num_layers,
+        num_gpus,
+        init_decoder,
+    ):
+        assert len(self.model_params['decoder_layer_configs']) == 1
+        decoder_num_units = (
+            self.model_params['decoder_layer_configs'][0]['num_units']
+        )
+
+        # Initializing RNN states
+        if (use_attention == False) and (init_decoder == 1):
+            raise ValueError("Use init_decoder=1 only without attention.")
+        if (init_decoder == 1) and (encoder_output_dim != decoder_num_units):
+            raise ValueError("Use init_decoder=1 only if num-units of encoder and decoder are equal.")
+
+        decoder_initial_hidden_states=[]
+        decoder_initial_cell_states=[]
+        assert len(final_encoder_hidden_states) == num_layers
+        assert len(final_encoder_cell_states) == num_layers
+        for l in range(num_layers):
+            if use_attention == False:
+                decoder_initial_hidden_state = model.FC(
+                    final_encoder_hidden_states[l],
+                    'decoder_initial_hidden_state',
+                    encoder_output_dim,
+                    decoder_num_units,
+                    axis=2,
+                )
+                decoder_initial_cell_state = model.FC(
+                    final_encoder_cell_states[l],
+                    'decoder_initial_cell_state',
+                    encoder_output_dim,
+                    decoder_num_units,
+                    axis=2,
+                )
+            else:
+                initial_attention_weighted_encoder_context = (
+                    model.param_init_net.ConstantFill(
+                        [],
+                        'initial_attention_weighted_encoder_context',
+                        shape=[encoder_output_dim],
+                        value=0.0,
+                    )
+                )
+                if init_decoder == 1:
+                    decoder_initial_hidden_state = final_encoder_hidden_states[l]
+                    decoder_initial_cell_state = final_encoder_cell_states[l]
+                else:
+                    decoder_initial_hidden_state = model.param_init_net.ConstantFill(
+                        [],
+                        'decoder_initial_hidden_state',
+                        shape=[decoder_num_units],
+                        value=0.0,
+                    )
+                    decoder_initial_cell_state = model.param_init_net.ConstantFill(
+                        [],
+                        'decoder_initial_cell_state',
+                        shape=[decoder_num_units],
+                        value=0.0,
+                    )
+            decoder_initial_hidden_states.append(decoder_initial_hidden_state)
+            decoder_initial_cell_states.append(decoder_initial_cell_state)
+
+        # Embedding layer
+        if self.num_gpus == 0:
+            embedded_decoder_inputs = model.net.Gather(
+                [self.decoder_embeddings, decoder_inputs],
+                ['embedded_decoder_inputs'],
+            )
+        else:
+            with core.DeviceScope(core.DeviceOption(caffe2_pb2.CPU)):
+                embedded_decoder_inputs_cpu = model.net.Gather(
+                    [self.decoder_embeddings, decoder_inputs],
+                    ['embedded_decoder_inputs_cpu'],
+                )
+            embedded_decoder_inputs = model.CopyCPUToGPU(
+                embedded_decoder_inputs_cpu,
+                'embedded_decoder_inputs',
+            )
+
+        # RNN layers
+        input_blob=embedded_decoder_inputs
+        dim_in=self.model_params['decoder_embedding_size']
+        dim_out=decoder_num_units
+
+        for l in range(num_layers-1):
+            decoder_outputs, _, _, _ = recurrent.LSTM(
+                model=model,
+                input_blob=input_blob,
+                seq_lengths=decoder_lengths,
+                initial_states=(
+                    decoder_initial_hidden_states[l],
+                    decoder_initial_cell_states[l],
+                ),
+                dim_in=dim_in,
+                dim_out=dim_out,
+                scope='decoder/layer_{}'.format(l),
+                outputs_with_grads=[0],
+            )
+
+            input_blob=decoder_outputs
+            dim_in=dim_out
+
+        # Last RNN layer (may be with attention)
+        if use_attention == False: 
+            decoder_outputs, _, _, _ = recurrent.LSTM(
+                model=model,
+                input_blob=input_blob,
+                seq_lengths=decoder_lengths,
+                initial_states=(
+                    decoder_initial_hidden_states[num_layers-1],
+                    decoder_initial_cell_states[num_layers-1],
+                ),
+                dim_in=dim_in,
+                dim_out=dim_out,
+                scope='decoder/layer_{}'.format(num_layers-1),
+                outputs_with_grads=[0],
+            )
+            decoder_output_size = decoder_num_units
+        else:
+            (
+                decoder_outputs, _, _, _,
+                attention_weighted_encoder_contexts, _
+            ) = recurrent.LSTMWithAttention(
+                model=model,
+                decoder_inputs=input_blob,
+                decoder_input_lengths=decoder_lengths,
+                initial_decoder_hidden_state=decoder_initial_hidden_states[num_layers-1],
+                initial_decoder_cell_state=decoder_initial_cell_states[num_layers-1],
+                initial_attention_weighted_encoder_context=(
+                    initial_attention_weighted_encoder_context
+                ),
+                encoder_output_dim=encoder_output_dim,
+                encoder_outputs=encoder_outputs,
+                decoder_input_dim=dim_in,
+                decoder_state_dim=dim_out,
+                scope='decoder/layer_{}'.format(num_layers-1),
+                outputs_with_grads=[0, 4],
+            )
+            decoder_outputs, _ = model.net.Concat(
+                [decoder_outputs, attention_weighted_encoder_contexts],
+                [
+                    'states_and_context_combination',
+                    '_states_and_context_combination_concat_dims',
+                ],
+                axis=2,
+            )
+            decoder_output_size = decoder_num_units + encoder_output_dim
+        return (
+            decoder_outputs,
+            decoder_output_size,
         )
 
     def output_projection(
@@ -357,8 +522,8 @@ class Seq2SeqModelCaffe2:
         (
             encoder_outputs,
             weighted_encoder_outputs,
-            final_encoder_hidden_state,
-            final_encoder_cell_state,
+            final_encoder_hidden_states,
+            final_encoder_cell_states,
             encoder_output_dim,
         ) = self._build_embedding_encoder(
             model=model,
@@ -368,113 +533,27 @@ class Seq2SeqModelCaffe2:
             embeddings=self.encoder_embeddings,
             embedding_size=self.model_params['encoder_embedding_size'],
             use_attention=(attention_type != 'none'),
+            num_layers=self.num_encoder_layers,
             num_gpus=self.num_gpus,
             forward_only=forward_only,
         )
 
-        assert len(self.model_params['decoder_layer_configs']) == 1
-        decoder_num_units = (
-            self.model_params['decoder_layer_configs'][0]['num_units']
+        (
+            decoder_outputs,
+            decoder_output_size,
+        ) = self._build_embedding_decoder(
+            model=model,
+            decoder_inputs=decoder_inputs,
+            decoder_lengths=decoder_lengths,
+            encoder_outputs=encoder_outputs,
+            final_encoder_hidden_states=final_encoder_hidden_states,
+            final_encoder_cell_states=final_encoder_cell_states,
+            encoder_output_dim=encoder_output_dim,
+            use_attention=(attention_type != 'none'),
+            num_layers=self.num_decoder_layers,
+            num_gpus=self.num_gpus,
+            init_decoder=self.init_decoder,
         )
-
-        if attention_type == 'none':
-            decoder_initial_hidden_state = model.FC(
-                final_encoder_hidden_state,
-                'decoder_initial_hidden_state',
-                encoder_output_dim,
-                decoder_num_units,
-                axis=2,
-            )
-            decoder_initial_cell_state = model.FC(
-                final_encoder_cell_state,
-                'decoder_initial_cell_state',
-                encoder_output_dim,
-                decoder_num_units,
-                axis=2,
-            )
-        else:
-            decoder_initial_hidden_state = model.param_init_net.ConstantFill(
-                [],
-                'decoder_initial_hidden_state',
-                shape=[decoder_num_units],
-                value=0.0,
-            )
-            decoder_initial_cell_state = model.param_init_net.ConstantFill(
-                [],
-                'decoder_initial_cell_state',
-                shape=[decoder_num_units],
-                value=0.0,
-            )
-            initial_attention_weighted_encoder_context = (
-                model.param_init_net.ConstantFill(
-                    [],
-                    'initial_attention_weighted_encoder_context',
-                    shape=[encoder_output_dim],
-                    value=0.0,
-                )
-            )
-
-        if self.num_gpus == 0:
-            embedded_decoder_inputs = model.net.Gather(
-                [self.decoder_embeddings, decoder_inputs],
-                ['embedded_decoder_inputs'],
-            )
-        else:
-            with core.DeviceScope(core.DeviceOption(caffe2_pb2.CPU)):
-                embedded_decoder_inputs_cpu = model.net.Gather(
-                    [self.decoder_embeddings, decoder_inputs],
-                    ['embedded_decoder_inputs_cpu'],
-                )
-            embedded_decoder_inputs = model.CopyCPUToGPU(
-                embedded_decoder_inputs_cpu,
-                'embedded_decoder_inputs',
-            )
-
-        # seq_len x batch_size x decoder_embedding_size
-        if attention_type == 'none':
-            decoder_outputs, _, _, _ = recurrent.LSTM(
-                model=model,
-                input_blob=embedded_decoder_inputs,
-                seq_lengths=decoder_lengths,
-                initial_states=(
-                    decoder_initial_hidden_state,
-                    decoder_initial_cell_state,
-                ),
-                dim_in=self.model_params['decoder_embedding_size'],
-                dim_out=decoder_num_units,
-                scope='decoder',
-                outputs_with_grads=[0],
-            )
-            decoder_output_size = decoder_num_units
-        else:
-            (
-                decoder_outputs, _, _, _,
-                attention_weighted_encoder_contexts, _
-            ) = recurrent.LSTMWithAttention(
-                model=model,
-                decoder_inputs=embedded_decoder_inputs,
-                decoder_input_lengths=decoder_lengths,
-                initial_decoder_hidden_state=decoder_initial_hidden_state,
-                initial_decoder_cell_state=decoder_initial_cell_state,
-                initial_attention_weighted_encoder_context=(
-                    initial_attention_weighted_encoder_context
-                ),
-                encoder_output_dim=encoder_output_dim,
-                encoder_outputs=encoder_outputs,
-                decoder_input_dim=self.model_params['decoder_embedding_size'],
-                decoder_state_dim=decoder_num_units,
-                scope='decoder',
-                outputs_with_grads=[0, 4],
-            )
-            decoder_outputs, _ = model.net.Concat(
-                [decoder_outputs, attention_weighted_encoder_contexts],
-                [
-                    'states_and_context_combination',
-                    '_states_and_context_combination_concat_dims',
-                ],
-                axis=2,
-            )
-            decoder_output_size = decoder_num_units + encoder_output_dim
 
         # we do softmax over the whole sequence
         # (max_length in the batch * batch_size) x decoder embedding size
@@ -777,6 +856,9 @@ class Seq2SeqModelCaffe2:
         num_gpus=1,
         num_cpus=1,
         optimizer="sgd",
+        num_encoder_layers=1,
+        num_decoder_layers=1,
+        init_decoder=0,
     ):
         self.model_params = model_params
         self.encoder_type = 'rnn'
@@ -787,6 +869,9 @@ class Seq2SeqModelCaffe2:
         self.num_cpus = num_cpus
         self.optimizer= optimizer
         self.batch_size = model_params['batch_size']
+        self.num_encoder_layers=num_encoder_layers
+        self.num_decoder_layers=num_decoder_layers
+        self.init_decoder=init_decoder
 
         workspace.GlobalInit([
             'caffe2',
@@ -955,6 +1040,9 @@ def run_seq2seq_model(args, model_params=None):
         num_gpus=args.num_gpus,
         num_cpus=20,
         optimizer=args.optimizer,
+        num_encoder_layers=args.num_encoder_layers,
+        num_decoder_layers=args.num_decoder_layers,
+        init_decoder=args.init_decoder,
     ) as model_obj:
         model_obj.initialize_from_scratch()
 
@@ -1080,6 +1168,14 @@ def main():
                         'in encoder')
     parser.add_argument('--use-attention', action='store_true',
                         help='Set flag to use seq2seq with attention model')
+    parser.add_argument('--num-encoder-layers', type=int, default=1,
+                        help='Number of RNN layers in encoder')
+    parser.add_argument('--num-decoder-layers', type=int, default=1,
+                        help='Number of RNN layers in decoder')
+    parser.add_argument('--init-decoder', type=int, default=0,
+                        help='If use_attention, initialize decoder states with '
+                        ' the last encoder states. If 0, the initial decoder '
+                        'states are set to zero.')
     parser.add_argument('--source-corpus-eval', type=str, default=None,
                         help='Path to source corpus for evaluation in a text '
                         'file format', required=True)
