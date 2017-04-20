@@ -41,7 +41,7 @@ def gen_vocab(filename, max_size):
 
     vocab = {PAD: 0, GO: 1, EOS: 2, UNK: 3}
     i = 4
-    for key, count in counter.most_common(max_size - len(vocab)):
+    for key, count in counter.most_common(max_size):
         vocab[key] = i
         i += 1
     assert len(vocab.keys()) <= max_size
