@@ -854,62 +854,114 @@ def run_seq2seq_model(args, model_params=None):
         with open("seq2seq_forward.pbtxt", "w") as fid:
             fid.write(str(model_obj.forward_net.Proto()))
 
-        epoch_size = sum([len(train_data[key][0]) for key in train_data]) \
-            // args.batch_size
-        display_interval=np.ceil(epoch_size / 100.0)
-        test_interval=np.ceil(epoch_size / 10.0)
-        print("epoch_size: {}".format(epoch_size))
-        print("display_interval: {}".format(display_interval))
-        print("test_interval: {}".format(test_interval))
+        sequences_per_epoch = sum([len(train_data[key][0])
+                                   for key in train_data])
+        iterations_per_epoch = int(np.ceil(sequences_per_epoch / args.batch_size))
+        tokens_per_epoch = sum([np.sum(train_data[key][1])
+                                for key in train_data])
+        tokens_with_padding_per_epoch = sum([train_data[key][0].size
+                                             for key in train_data])
+        display_interval = int(np.ceil(iterations_per_epoch / 100.0))
+        test_interval = int(np.ceil(iterations_per_epoch / 10.0))
 
-        for e in range(args.epochs):
-            logger.info('Epoch {}'.format(e))
-            total_loss = 0
-            epoch_time = 0
-            for i, batch in enumerate(seq2seq_data.iterate_epoch(
-                    train_data, args.batch_size, shuffle=True)):
+        print("Iterations per epoch:    ", iterations_per_epoch)
+        print("Sequences per epoch:     ", sequences_per_epoch)
+        print("Tokens per epoch:        ", tokens_per_epoch)
+        print("Tokens+padding per epoch:", tokens_with_padding_per_epoch)
+        print("display_interval:        ", display_interval)
+        print("test_interval:           ", test_interval)
+
+        for epoch in range(args.epochs):
+            # For display
+            epoch_start = timer()
+            current_iter = 0
+            last_display_iter = 0
+            display_time = 0
+            display_loss = 0
+            display_sequences = 0
+            display_tokens = 0
+            display_padding = 0
+
+            for batch in seq2seq_data.iterate_epoch(
+                    train_data, args.batch_size, shuffle=True):
+                current_iter += 1
                 encoder_token_num = np.sum(batch[1])
                 decoder_token_num = np.sum(batch[3])
 
                 start_time = timer()
-                loss = model_obj.step(
-                    batch=batch,
-                    forward_only=False,
-                )
-                end_time = timer()
-                step_time = end_time - start_time
-                epoch_time += step_time
-                total_loss += loss
-                if(i % display_interval == 0):
+                loss = model_obj.step(batch=batch, forward_only=False)
+                step_time = timer() - start_time
 
-                    encoder_lengths = batch[1]
-                    max_encoder_length = max(encoder_lengths)
-                    decoder_lengths = []
-                    max_decoder_length = max(batch[3])
+                # Updates for display
+                display_time += step_time
+                display_loss += loss
+                step_tokens = np.sum(batch[1])
+                display_sequences += len(batch[0])
+                display_tokens += step_tokens
+                display_padding += (batch[0].size - step_tokens)
+                current_epoch = epoch + float(current_iter) / iterations_per_epoch
 
-                    print("Step_time: {} ms".format(int(1000*step_time)))
-                    print("Tokens num: {}".format(int(max_encoder_length + max_decoder_length)))
-                    print("Tokens/sec: {}".format(int((max_encoder_length + max_decoder_length) / step_time)))
-                    print("Iter: {}".format(i))
-                    print('Training loss {}'.format(loss))
-                    print('Training Perplexity: {}'.format(pow(2, loss/decoder_token_num)))
-                    print("\n")
+                # Display
+                if current_iter % display_interval == 0:
+                    perplexity = pow(2, display_loss / display_tokens)
+                    print("Epoch %f/%d" % (current_epoch, args.epochs))
+                    print("    Displaying after %d iterations, %f seconds" %
+                          (current_iter - last_display_iter, display_time))
+                    print("    Training loss=%f, perplexity=%f" %
+                          (loss, perplexity))
+                    print("    Iterations/second:     %f" %
+                          ((current_iter - last_display_iter) / display_time,))
+                    print("    Sequences/second:      %f" %
+                          (display_sequences / display_time,))
+                    print("    Tokens/second:         %f" %
+                          (display_tokens / display_time,))
+                    print("    Tokens+padding/second: %f" %
+                          ((display_tokens + display_padding) / display_time,))
+                    last_display_iter = current_iter
+                    display_time = 0
+                    display_loss = 0
+                    display_sequences = 0
+                    display_tokens = 0
+                    display_padding = 0
 
-                if(i % test_interval == 0):
-                    total_test_loss = 0
-                    decoder_token_num=0
-                    for i, batch in enumerate(seq2seq_data.iterate_epoch(
-                            test_data, args.batch_size)):
-                        decoder_token_num += np.sum(batch[3])
-                        loss = model_obj.step(
-                            batch=batch,
-                            forward_only=True,
-                        )
-                        total_test_loss += loss
-                    print('Eval total_test_loss {}'.format(total_test_loss))
-                    print('Eval Perplexity: {}'.format(pow(2, total_test_loss / decoder_token_num)))
-                    print("\n")
-            print("Epoch_time: {} sec".format(int(epoch_time)))
+                if current_iter % test_interval == 0:
+                    print("\nEvaluating model ...")
+                    eval_start = timer()
+                    eval_iterations = 0
+                    eval_loss = 0
+                    eval_sequences = 0
+                    eval_tokens = 0
+                    eval_padding = 0
+                    for batch in seq2seq_data.iterate_epoch(
+                            test_data, args.batch_size):
+                        loss = model_obj.step(batch=batch, forward_only=True)
+                        eval_iterations += 1
+                        eval_loss += loss
+                        eval_sequences += len(batch[0])
+                        step_tokens = np.sum(batch[1])
+                        eval_tokens += step_tokens
+                        eval_padding += (batch[0].size - step_tokens)
+
+                    eval_time = timer() - eval_start
+
+                    perplexity = pow(2, eval_loss / eval_tokens)
+                    print("    Displaying after %d iterations, %f seconds" %
+                          (eval_iterations, eval_time))
+                    print("    Evaluation loss=%f, perplexity=%f" %
+                          (eval_loss, perplexity))
+                    print("    Iterations/second:     %f" %
+                          (eval_iterations / eval_time,))
+                    print("    Sequences/second:      %f" %
+                          (eval_sequences / eval_time,))
+                    print("    Tokens/second:         %f" %
+                          (eval_tokens / eval_time,))
+                    print("    Tokens+padding/second: %f" %
+                          ((eval_tokens + eval_padding) / eval_time,))
+                    print()
+
+            epoch_time = timer() - epoch_start
+            print("\nEpoch %d finished in %d seconds.\n" %
+                  (epoch + 1, int(round(epoch_time))))
 
 def run_seq2seq_rnn_unidirection_with_no_attention(args):
     run_seq2seq_model(args, model_params=dict(
