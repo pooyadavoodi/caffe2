@@ -109,6 +109,8 @@ def rnn_bidirectional_encoder(
     dim_in=embedding_size
     dim_out=encoder_num_units
 
+    final_hidden_states=[]
+    final_cell_states=[]
     for l in range(num_layers):
         # Forward pass
         (
@@ -172,8 +174,9 @@ def rnn_bidirectional_encoder(
             ['final_cell_state', 'final_cell_state_dim'],
             axis=2,
         )
-
+        final_hidden_states.append(final_hidden_state)
+        final_cell_states.append(final_cell_state)
         input_blob=outputs
         dim_in=dim_out
 
-    return outputs, final_hidden_state, final_cell_state
+    return outputs, final_hidden_states, final_cell_states
