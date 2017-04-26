@@ -1102,6 +1102,14 @@ def run_seq2seq_model(args, model_params=None):
                   (epoch_eval_loss[epoch], epoch_eval_perplexity[epoch]))
             print()
 
+            # Change LR if needed
+            if (epoch >= args.start_decay_at) or\
+                    (epoch > 0 and epoch_eval_perplexity[epoch] > epoch_eval_perplexity[epoch-1]):
+                current_lr = float(workspace.FetchBlob("learning_rate"))
+                adjusted_lr = current_lr * args.learning_rate_decay
+                workspace.FeedBlob("learning_rate", np.array([adjusted_lr], dtype=np.float32))
+                print("    Changing learning rate from {} to {}.".format(current_lr, adjusted_lr))
+
 def run_seq2seq_rnn_unidirection_with_no_attention(args):
     run_seq2seq_model(args, model_params=dict(
         attention=('regular' if args.use_attention else 'none'),
@@ -1139,7 +1147,11 @@ def main():
                         help='Training batch size')
     parser.add_argument('--epochs', type=int, default=10,
                         help='Number of iterations over training data')
-    parser.add_argument('--learning-rate', type=float, default=0.5,
+    parser.add_argument('--learning-rate', type=float, default=1.0,
+                        help='Learning rate')
+    parser.add_argument('--learning-rate-decay', type=float, default=0.5,
+                        help='Learning rate')
+    parser.add_argument('--start-decay-at', type=int, default=8,
                         help='Learning rate')
     parser.add_argument('--max-gradient-norm', type=float, default=1.0,
                         help='Max global norm of gradients at the end of each '
