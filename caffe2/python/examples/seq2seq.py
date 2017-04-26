@@ -896,7 +896,7 @@ class Seq2SeqModelCaffe2:
                 workspace.FeedBlob(batch_obj_name, batch_obj_value)
         else:
             for i in range(self.num_gpus):
-                gpu_batch = batch[i::self.num_gpus]
+                gpu_batch = tuple(tensor[i::self.num_gpus] for tensor in batch)
                 batch_obj = prepare_batch(gpu_batch)
                 for batch_obj_name, batch_obj_value in izip(
                     Batch._fields,
