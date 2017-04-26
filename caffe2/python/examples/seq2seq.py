@@ -977,6 +977,7 @@ def run_seq2seq_model(args, model_params=None):
         print("    Tokens+padding per epoch: ", train_total_tokens_with_padding_per_epoch)
         print("    display_interval:         ", display_interval)
         print("    test_interval:            ", test_interval)
+        print("    learning rate:            ", float(workspace.FetchBlob("learning_rate")))
 
         print("Evaluation stats:")
         print("    Iterations per epoch:     ", eval_iterations_per_epoch)
@@ -987,6 +988,10 @@ def run_seq2seq_model(args, model_params=None):
               eval_encoder_tokens_per_epoch + eval_decoder_tokens_per_epoch)
         print("    Tokens+padding per epoch: ", eval_total_tokens_with_padding_per_epoch)
 
+        epoch_train_loss = np.zeros(args.epochs, dtype=np.float32)
+        epoch_eval_loss = np.zeros(args.epochs, dtype=np.float32)
+        epoch_train_perplexity = []
+        epoch_eval_perplexity = []
         for epoch in range(args.epochs):
             # For display
             epoch_start = timer()
@@ -998,8 +1003,6 @@ def run_seq2seq_model(args, model_params=None):
             display_encoder_tokens = 0
             display_decoder_tokens = 0
             display_tokens_with_padding = 0
-            epoch_train_loss = 0
-            epoch_eval_loss = 0
 
             for batch in seq2seq_data.iterate_epoch(
                     train_data, args.batch_size, shuffle=True):
@@ -1014,7 +1017,7 @@ def run_seq2seq_model(args, model_params=None):
                 # Updates for display
                 display_time += step_time
                 display_loss += loss
-                epoch_train_loss += loss
+                epoch_train_loss[epoch] += loss
                 display_sequences += len(batch[0])
                 display_encoder_tokens += np.sum(batch[1])
                 display_decoder_tokens += np.sum(batch[3])
@@ -1062,13 +1065,13 @@ def run_seq2seq_model(args, model_params=None):
                         loss = model_obj.step(batch=batch, forward_only=True)
                         eval_iterations += 1
                         eval_loss += loss
-                        epoch_eval_loss += loss
                         eval_sequences += len(batch[0])
                         eval_encoder_tokens += np.sum(batch[1])
                         eval_decoder_tokens += np.sum(batch[3])
                         eval_tokens_with_padding += batch[0].size + batch[2].size
 
                     eval_time = timer() - eval_start
+                    epoch_eval_loss[epoch] = eval_loss
 
                     perplexity = pow(2, eval_loss / eval_decoder_tokens)
                     print("    Displaying after %d iterations, %f seconds" %
@@ -1087,14 +1090,17 @@ def run_seq2seq_model(args, model_params=None):
                     print()
 
             train_eval_epoch_time = timer() - epoch_start
-            epoch_train_perplexity = pow(2, epoch_train_loss / train_decoder_tokens_per_epoch)
-            epoch_eval_perplexity = pow(2, epoch_eval_loss / eval_decoder_tokens_per_epoch)
+            epoch_train_perplexity.append(
+                pow(2, epoch_train_loss[epoch] / train_decoder_tokens_per_epoch))
+            epoch_eval_perplexity.append(
+                pow(2, epoch_eval_loss[epoch] / eval_decoder_tokens_per_epoch))
             print("\nEpoch %d finished in %d seconds.\n" %
                   (epoch + 1, int(round(train_eval_epoch_time))))
             print("    Training loss=%f, perplexity=%f" %
-                  (epoch_train_loss, epoch_train_perplexity))
+                  (epoch_train_loss[epoch], epoch_train_perplexity[epoch]))
             print("    Evaluation loss=%f, perplexity=%f" %
-                  (epoch_eval_loss, epoch_eval_perplexity))
+                  (epoch_eval_loss[epoch], epoch_eval_perplexity[epoch]))
+            print()
 
 def run_seq2seq_rnn_unidirection_with_no_attention(args):
     run_seq2seq_model(args, model_params=dict(
