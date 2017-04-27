@@ -1108,7 +1108,7 @@ def run_seq2seq_model(args, model_params=None):
                 current_lr = float(workspace.FetchBlob("learning_rate"))
                 adjusted_lr = current_lr * args.learning_rate_decay
                 workspace.FeedBlob("learning_rate", np.array([adjusted_lr], dtype=np.float32))
-                print("    Changing learning rate from {} to {}.".format(current_lr, adjusted_lr))
+                print("    Changing learning rate from {} to {}".format(current_lr, adjusted_lr))
 
 def run_seq2seq_rnn_unidirection_with_no_attention(args):
     run_seq2seq_model(args, model_params=dict(
