@@ -2,6 +2,7 @@
 from __future__ import division, print_function
 
 import argparse
+import collections
 from collections import Counter, defaultdict
 import itertools
 import os.path
@@ -11,8 +12,9 @@ from timeit import default_timer as timer
 
 import numpy as np
 import six
+from itertools import izip
 
-import seq2seq_cache as cache
+import cache
 
 
 _PAD_ID = 0
@@ -386,6 +388,49 @@ def iterate_epoch(data, batch_size, shuffle=False):
         yield (data[key][0][indices], data[key][1][indices],
                data[key][2][indices], data[key][3][indices])
 
+Batch = collections.namedtuple('Batch', [
+    'encoder_inputs',
+    'encoder_lengths',
+    'decoder_inputs',
+    'decoder_lengths',
+    'targets',
+    'target_weights',
+])
+
+def prepare_batch(batch):
+    (source_inputs, source_lengths,
+     target_inputs, target_lengths) = batch
+
+    # encoder_inputs = reverse(source_inputs)
+    encoder_inputs = np.full(source_inputs.shape, _PAD_ID,
+                             dtype=source_inputs.dtype)
+    for i, (row, length) in enumerate(izip(source_inputs, source_lengths)):
+        encoder_inputs[i, :length] = row[length - 1::-1]
+    encoder_lengths = source_lengths
+
+    # decoder_inputs = [_GO_ID] + target_inputs
+    decoder_inputs = np.hstack([
+        np.full((len(target_inputs), 1), _GO_ID, dtype=target_inputs.dtype),
+        target_inputs])
+    decoder_lengths = target_lengths + 1
+
+    # targets = target_inputs + [_EOS_ID]
+    targets = np.hstack([
+        target_inputs,
+        np.full((len(target_inputs), 1), _PAD_ID, dtype=target_inputs.dtype)])
+    target_weights = np.zeros(targets.shape, dtype=np.float32)
+    for i, length in enumerate(target_lengths):
+        targets[i, length] = _EOS_ID
+        target_weights[i, :length] = 1
+
+    return Batch(
+        encoder_inputs=encoder_inputs.transpose(),
+        encoder_lengths=encoder_lengths,
+        decoder_inputs=decoder_inputs.transpose(),
+        decoder_lengths=decoder_lengths,
+        targets=targets.transpose(),
+        target_weights=target_weights.transpose(),
+    )
 
 def addParserArguments(parser):
     """Add arguments to an argparse.ArgumentParser."""

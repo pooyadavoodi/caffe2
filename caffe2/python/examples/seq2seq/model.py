@@ -5,86 +5,21 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
-import argparse
-import collections
 import logging
 import math
 import numpy as np
-import random
 import time
 import sys
-from timeit import default_timer as timer
-
 from itertools import izip
 
 import caffe2.proto.caffe2_pb2 as caffe2_pb2
 from caffe2.python import core, workspace, recurrent, data_parallel_model
-from caffe2.python.examples import seq2seq_util
-
-import seq2seq_data
-
-import matplotlib.pyplot as plt
-reload(sys)
-sys.setdefaultencoding('utf8')
+import util, data
 
 logging.basicConfig()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 logger.addHandler(logging.StreamHandler(sys.stderr))
-
-Batch = collections.namedtuple('Batch', [
-    'encoder_inputs',
-    'encoder_lengths',
-    'decoder_inputs',
-    'decoder_lengths',
-    'targets',
-    'target_weights',
-])
-
-_PAD_ID = 0
-_GO_ID = 1
-_EOS_ID = 2
-EOS = '<EOS>'
-UNK = '<UNK>'
-GO = '<GO>'
-PAD = '<PAD>'
-
-
-def prepare_batch(batch):
-    (source_inputs, source_lengths,
-     target_inputs, target_lengths) = batch
-
-    # encoder_inputs = reverse(source_inputs)
-    encoder_inputs = np.full(source_inputs.shape, _PAD_ID,
-                             dtype=source_inputs.dtype)
-    for i, (row, length) in enumerate(izip(source_inputs, source_lengths)):
-        encoder_inputs[i, :length] = row[length - 1::-1]
-    encoder_lengths = source_lengths
-
-    # decoder_inputs = [_GO_ID] + target_inputs
-    decoder_inputs = np.hstack([
-        np.full((len(target_inputs), 1), _GO_ID, dtype=target_inputs.dtype),
-        target_inputs])
-    decoder_lengths = target_lengths + 1
-
-    # targets = target_inputs + [_EOS_ID]
-    targets = np.hstack([
-        target_inputs,
-        np.full((len(target_inputs), 1), _PAD_ID, dtype=target_inputs.dtype)])
-    target_weights = np.zeros(targets.shape, dtype=np.float32)
-    for i, length in enumerate(target_lengths):
-        targets[i, length] = _EOS_ID
-        target_weights[i, :length] = 1
-
-    return Batch(
-        encoder_inputs=encoder_inputs.transpose(),
-        encoder_lengths=encoder_lengths,
-        decoder_inputs=decoder_inputs.transpose(),
-        decoder_lengths=decoder_lengths,
-        targets=targets.transpose(),
-        target_weights=target_weights.transpose(),
-    )
-
 
 class Seq2SeqModelCaffe2:
 
@@ -92,11 +27,11 @@ class Seq2SeqModelCaffe2:
         self,
         init_params,
     ):
-        model = seq2seq_util.ModelHelper(init_params=init_params)
+        model = util.ModelHelper(init_params=init_params)
         self._build_shared(model)
         self._build_embeddings(model)
 
-        forward_model = seq2seq_util.ModelHelper(init_params=init_params)
+        forward_model = util.ModelHelper(init_params=init_params)
         self._build_shared(forward_model)
         self._build_embeddings(forward_model)
 
@@ -190,10 +125,10 @@ class Seq2SeqModelCaffe2:
             )
             # Choose corresponding rnn encoder function
             if self.encoder_params['use_bidirectional_encoder']:
-                rnn_encoder_func = seq2seq_util.rnn_bidirectional_encoder
+                rnn_encoder_func = util.rnn_bidirectional_encoder
                 encoder_output_dim = 2 * encoder_num_units
             else:
-                rnn_encoder_func = seq2seq_util.rnn_unidirectional_encoder
+                rnn_encoder_func = util.rnn_unidirectional_encoder
                 encoder_output_dim = encoder_num_units
 
             (
@@ -888,18 +823,18 @@ class Seq2SeqModelCaffe2:
         forward_only
     ):
         if self.num_gpus < 1:
-            batch_obj = prepare_batch(batch)
+            batch_obj = data.prepare_batch(batch)
             for batch_obj_name, batch_obj_value in izip(
-                Batch._fields,
+                data.Batch._fields,
                 batch_obj,
             ):
                 workspace.FeedBlob(batch_obj_name, batch_obj_value)
         else:
             for i in range(self.num_gpus):
                 gpu_batch = tuple(tensor[i::self.num_gpus] for tensor in batch)
-                batch_obj = prepare_batch(gpu_batch)
+                batch_obj = data.prepare_batch(gpu_batch)
                 for batch_obj_name, batch_obj_value in izip(
-                    Batch._fields,
+                    data.Batch._fields,
                     batch_obj,
                 ):
                     name = 'gpu_{}/{}'.format(i, batch_obj_name)
@@ -917,277 +852,3 @@ class Seq2SeqModelCaffe2:
 
         return self.total_loss_scalar()
 
-
-def run_seq2seq_model(args, model_params=None):
-    (source_vocab, target_vocab,
-     train_data, eval_data) = seq2seq_data.get_data(args)
-
-    with Seq2SeqModelCaffe2(
-        model_params=model_params,
-        source_vocab_size=len(source_vocab),
-        target_vocab_size=len(target_vocab),
-        num_gpus=args.num_gpus,
-        num_cpus=20,
-        optimizer=args.optimizer,
-        num_encoder_layers=args.num_encoder_layers,
-        num_decoder_layers=args.num_decoder_layers,
-        init_decoder=args.init_decoder,
-    ) as model_obj:
-        model_obj.initialize_from_scratch()
-
-        with open("seq2seq.pbtxt", "w") as fid:
-            fid.write(str(model_obj.model.net.Proto()))
-        with open("seq2seq_init.pbtxt", "w") as fid:
-            fid.write(str(model_obj.model.param_init_net.Proto()))
-        with open("seq2seq_forward.pbtxt", "w") as fid:
-            fid.write(str(model_obj.forward_net.Proto()))
-
-        train_sequences_per_epoch = sum([len(train_data[key][0])
-                                   for key in train_data])
-        train_iterations_per_epoch = int(np.ceil(train_sequences_per_epoch / args.batch_size))
-        train_encoder_tokens_per_epoch = sum([np.sum(train_data[key][1])
-                                        for key in train_data])
-        train_decoder_tokens_per_epoch = sum([np.sum(train_data[key][3])
-                                        for key in train_data])
-        train_total_tokens_with_padding_per_epoch = sum([
-            train_data[key][0].size + train_data[key][2].size
-            for key in train_data])
-
-        display_interval = int(np.ceil(train_iterations_per_epoch / 100.0))
-        test_interval = int(np.ceil(train_iterations_per_epoch / 10.0))
-
-        eval_sequences_per_epoch = sum([len(eval_data[key][0])
-                                   for key in eval_data])
-        eval_iterations_per_epoch = int(np.ceil(eval_sequences_per_epoch / args.batch_size))
-        eval_encoder_tokens_per_epoch = sum([np.sum(eval_data[key][1])
-                                        for key in eval_data])
-        eval_decoder_tokens_per_epoch = sum([np.sum(eval_data[key][3])
-                                        for key in eval_data])
-        eval_total_tokens_with_padding_per_epoch = sum([
-            eval_data[key][0].size + eval_data[key][2].size
-            for key in eval_data])
-
-        print("Training stats:")
-        print("    Iterations per epoch:     ", train_iterations_per_epoch)
-        print("    Sequences per epoch:      ", train_sequences_per_epoch)
-        print("    Encoder tokens per epoch: ", train_encoder_tokens_per_epoch)
-        print("    Decoder tokens per epoch: ", train_decoder_tokens_per_epoch)
-        print("    Total tokens per epoch:   ",
-              train_encoder_tokens_per_epoch + train_decoder_tokens_per_epoch)
-        print("    Tokens+padding per epoch: ", train_total_tokens_with_padding_per_epoch)
-        print("    display_interval:         ", display_interval)
-        print("    test_interval:            ", test_interval)
-        print("    learning rate:            ", float(workspace.FetchBlob("learning_rate")))
-
-        print("Evaluation stats:")
-        print("    Iterations per epoch:     ", eval_iterations_per_epoch)
-        print("    Sequences per epoch:      ", eval_sequences_per_epoch)
-        print("    Encoder tokens per epoch: ", eval_encoder_tokens_per_epoch)
-        print("    Decoder tokens per epoch: ", eval_decoder_tokens_per_epoch)
-        print("    Total tokens per epoch:   ",
-              eval_encoder_tokens_per_epoch + eval_decoder_tokens_per_epoch)
-        print("    Tokens+padding per epoch: ", eval_total_tokens_with_padding_per_epoch)
-
-        epoch_train_loss = np.zeros(args.epochs, dtype=np.float32)
-        epoch_eval_loss = np.zeros(args.epochs, dtype=np.float32)
-        epoch_train_perplexity = []
-        epoch_eval_perplexity = []
-        for epoch in range(args.epochs):
-            # For display
-            epoch_start = timer()
-            current_iter = 0
-            last_display_iter = 0
-            display_time = 0
-            display_loss = 0
-            display_sequences = 0
-            display_encoder_tokens = 0
-            display_decoder_tokens = 0
-            display_tokens_with_padding = 0
-
-            for batch in seq2seq_data.iterate_epoch(
-                    train_data, args.batch_size, shuffle=True):
-                current_iter += 1
-                encoder_token_num = np.sum(batch[1])
-                decoder_token_num = np.sum(batch[3])
-
-                start_time = timer()
-                loss = model_obj.step(batch=batch, forward_only=False)
-                step_time = timer() - start_time
-
-                # Updates for display
-                display_time += step_time
-                display_loss += loss
-                epoch_train_loss[epoch] += loss
-                display_sequences += len(batch[0])
-                display_encoder_tokens += np.sum(batch[1])
-                display_decoder_tokens += np.sum(batch[3])
-                display_tokens_with_padding += batch[0].size + batch[2].size
-                current_epoch = epoch + float(current_iter) / train_iterations_per_epoch
-
-                # Display
-                if current_iter % display_interval == 0:
-                    perplexity = pow(2, display_loss / display_decoder_tokens)
-                    print("Epoch %f/%d" % (current_epoch, args.epochs))
-                    print("    Displaying after %d iterations, %f seconds" %
-                          (current_iter - last_display_iter, display_time))
-                    print("    Training loss=%f, perplexity=%f" %
-                          (loss, perplexity))
-                    print("    Iterations/second:     %f" %
-                          ((current_iter - last_display_iter) / display_time,))
-                    print("    Sequences/second:      %f" %
-                          (display_sequences / display_time,))
-                    print("    Tokens/second:         %f" %
-                          ((display_encoder_tokens + display_decoder_tokens)
-                           / display_time,))
-                    print("    Tokens+padding/second: %f" %
-                          (display_tokens_with_padding / display_time,))
-                    last_display_iter = current_iter
-                    display_time = 0
-                    display_loss = 0
-                    display_sequences = 0
-                    display_tokens = 0
-                    display_padding = 0
-                    display_encoder_tokens = 0
-                    display_decoder_tokens = 0
-                    display_tokens_with_padding = 0
-
-                if current_iter % test_interval == 0:
-                    print("\nEvaluating model ...")
-                    eval_start = timer()
-                    eval_iterations = 0
-                    eval_loss = 0
-                    eval_sequences = 0
-                    eval_encoder_tokens = 0
-                    eval_decoder_tokens = 0
-                    eval_tokens_with_padding = 0
-                    for batch in seq2seq_data.iterate_epoch(
-                            eval_data, args.batch_size):
-                        loss = model_obj.step(batch=batch, forward_only=True)
-                        eval_iterations += 1
-                        eval_loss += loss
-                        eval_sequences += len(batch[0])
-                        eval_encoder_tokens += np.sum(batch[1])
-                        eval_decoder_tokens += np.sum(batch[3])
-                        eval_tokens_with_padding += batch[0].size + batch[2].size
-
-                    eval_time = timer() - eval_start
-                    epoch_eval_loss[epoch] = eval_loss
-
-                    perplexity = pow(2, eval_loss / eval_decoder_tokens)
-                    print("    Displaying after %d iterations, %f seconds" %
-                          (eval_iterations, eval_time))
-                    print("    Evaluation loss=%f, perplexity=%f" %
-                          (eval_loss, perplexity))
-                    print("    Iterations/second:     %f" %
-                          (eval_iterations / eval_time,))
-                    print("    Sequences/second:      %f" %
-                          (eval_sequences / eval_time,))
-                    print("    Tokens/second:         %f" %
-                          ((eval_encoder_tokens + eval_decoder_tokens)
-                           / eval_time,))
-                    print("    Tokens+padding/second: %f" %
-                          (eval_tokens_with_padding / eval_time,))
-                    print()
-
-            train_eval_epoch_time = timer() - epoch_start
-            epoch_train_perplexity.append(
-                pow(2, epoch_train_loss[epoch] / train_decoder_tokens_per_epoch))
-            epoch_eval_perplexity.append(
-                pow(2, epoch_eval_loss[epoch] / eval_decoder_tokens_per_epoch))
-            print("\nEpoch %d finished in %d seconds.\n" %
-                  (epoch + 1, int(round(train_eval_epoch_time))))
-            print("    Training loss=%f, perplexity=%f" %
-                  (epoch_train_loss[epoch], epoch_train_perplexity[epoch]))
-            print("    Evaluation loss=%f, perplexity=%f" %
-                  (epoch_eval_loss[epoch], epoch_eval_perplexity[epoch]))
-            print()
-
-            # Change LR if needed
-            if (epoch >= args.start_decay_at) or\
-                    (epoch > 0 and epoch_eval_perplexity[epoch] > epoch_eval_perplexity[epoch-1]):
-                current_lr = float(workspace.FetchBlob("learning_rate"))
-                adjusted_lr = current_lr * args.learning_rate_decay
-                workspace.FeedBlob("learning_rate", np.array([adjusted_lr], dtype=np.float32))
-                print("    Changing learning rate from {} to {}".format(current_lr, adjusted_lr))
-
-def run_seq2seq_rnn_unidirection_with_no_attention(args):
-    run_seq2seq_model(args, model_params=dict(
-        attention=('regular' if args.use_attention else 'none'),
-        decoder_layer_configs=[
-            dict(
-                num_units=args.decoder_cell_num_units,
-            ),
-        ],
-        encoder_type=dict(
-            encoder_layer_configs=[
-                dict(
-                    num_units=args.encoder_cell_num_units,
-                ),
-            ],
-            use_bidirectional_encoder=args.use_bidirectional_encoder,
-        ),
-        batch_size=args.batch_size,
-        optimizer_params=dict(
-            learning_rate=args.learning_rate,
-        ),
-        encoder_embedding_size=args.encoder_embedding_size,
-        decoder_embedding_size=args.decoder_embedding_size,
-        decoder_softmax_size=args.decoder_softmax_size,
-        max_gradient_norm=args.max_gradient_norm,
-    ))
-
-
-def main():
-    random.seed(31415)
-    parser = argparse.ArgumentParser(
-        description='Caffe2: Seq2Seq Training',
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    seq2seq_data.addParserArguments(parser)
-    parser.add_argument('--batch-size', type=int, default=32,
-                        help='Training batch size')
-    parser.add_argument('--epochs', type=int, default=10,
-                        help='Number of iterations over training data')
-    parser.add_argument('--learning-rate', type=float, default=1.0,
-                        help='Learning rate')
-    parser.add_argument('--learning-rate-decay', type=float, default=0.5,
-                        help='Learning rate')
-    parser.add_argument('--start-decay-at', type=int, default=8,
-                        help='Learning rate')
-    parser.add_argument('--max-gradient-norm', type=float, default=1.0,
-                        help='Max global norm of gradients at the end of each '
-                        'backward pass. We do clipping to match the number.')
-    parser.add_argument('--use-bidirectional-encoder', action='store_true',
-                        help='Set flag to use bidirectional recurrent network '
-                        'in encoder')
-    parser.add_argument('--use-attention', action='store_true',
-                        help='Set flag to use seq2seq with attention model')
-    parser.add_argument('--num-encoder-layers', type=int, default=1,
-                        help='Number of RNN layers in encoder')
-    parser.add_argument('--num-decoder-layers', type=int, default=1,
-                        help='Number of RNN layers in decoder')
-    parser.add_argument('--init-decoder', type=int, default=0,
-                        help='If use_attention, initialize decoder states with '
-                        ' the last encoder states. If 0, the initial decoder '
-                        'states are set to zero.')
-    parser.add_argument('--encoder-cell-num-units', type=int, default=256,
-                        help='Number of cell units in the encoder layer')
-    parser.add_argument('--decoder-cell-num-units', type=int, default=512,
-                        help='Number of cell units in the decoder layer')
-    parser.add_argument('--encoder-embedding-size', type=int, default=256,
-                        help='Size of embedding in the encoder layer')
-    parser.add_argument('--decoder-embedding-size', type=int, default=512,
-                        help='Size of embedding in the decoder layer')
-    parser.add_argument('--decoder-softmax-size', type=int, default=None,
-                        help='Size of softmax layer in the decoder')
-    parser.add_argument('--num-gpus', type=int, default=0,
-                        help='Number of GPUs for data parallel model')
-    parser.add_argument('--optimizer', type=str,
-                        help='Optimizer type: sgd, momentum, adagrad')
-
-    args = parser.parse_args()
-
-    run_seq2seq_rnn_unidirection_with_no_attention(args)
-
-
-if __name__ == '__main__':
-    main()
