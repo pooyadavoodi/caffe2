@@ -63,7 +63,8 @@ def rnn_unidirectional_encoder(
     embedding_size,
     encoder_num_units,
     use_attention,
-    num_layers=1,
+    num_layers,
+    dropout,
 ):
     """ Unidirectional (forward pass) LSTM encoder."""
 
@@ -84,6 +85,8 @@ def rnn_unidirectional_encoder(
             scope='encoder/layer_{}'.format(l),
             outputs_with_grads=([0] if use_attention else [1, 3]),
         )
+        if(dropout != None) and (l != num_layers-1):
+          outputs = model.Dropout(outputs, str(outputs), ratio=dropout)
         final_hidden_states.append(final_hidden_state)
         final_cell_states.append(final_cell_state)
         input_blob=outputs
@@ -101,7 +104,8 @@ def rnn_bidirectional_encoder(
     embedding_size,
     encoder_num_units,
     use_attention,
-    num_layers=1,
+    num_layers,
+    dropout,
 ):
     """ Bidirectional (forward pass and backward pass) Stacked-LSTM encoder."""
 
@@ -174,6 +178,8 @@ def rnn_bidirectional_encoder(
             ['final_cell_state', 'final_cell_state_dim'],
             axis=2,
         )
+        if(dropout != None) and (l != num_layers-1):
+          outputs = model.Dropout(outputs, str(outputs), ratio=dropout)
         final_hidden_states.append(final_hidden_state)
         final_cell_states.append(final_cell_state)
         input_blob=outputs

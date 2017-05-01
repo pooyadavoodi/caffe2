@@ -85,6 +85,7 @@ class Seq2SeqModelCaffe2:
         embedding_size,
         use_attention,
         num_layers,
+        dropout,
         num_gpus,
         forward_only=False,
     ):
@@ -144,7 +145,8 @@ class Seq2SeqModelCaffe2:
                 embedding_size,
                 encoder_num_units,
                 use_attention,
-                num_layers
+                num_layers,
+                dropout,
             )
             weighted_encoder_outputs = None
         else:
@@ -172,6 +174,7 @@ class Seq2SeqModelCaffe2:
         num_layers,
         num_gpus,
         init_decoder,
+        dropout,
     ):
         assert len(self.model_params['decoder_layer_configs']) == 1
         decoder_num_units = (
@@ -268,7 +271,8 @@ class Seq2SeqModelCaffe2:
                 scope='decoder/layer_{}'.format(l),
                 outputs_with_grads=[0],
             )
-
+            if (dropout != None) and (l != num_layers-1):
+              decoder_outputs = model.Dropout(decoder_outputs, str(decoder_outputs), ratio=dropout)
             input_blob=decoder_outputs
             dim_in=dim_out
 
@@ -446,6 +450,7 @@ class Seq2SeqModelCaffe2:
             embedding_size=self.model_params['encoder_embedding_size'],
             use_attention=(attention_type != 'none'),
             num_layers=self.num_encoder_layers,
+            dropout=self.dropout,
             num_gpus=self.num_gpus,
             forward_only=forward_only,
         )
@@ -465,6 +470,7 @@ class Seq2SeqModelCaffe2:
             num_layers=self.num_decoder_layers,
             num_gpus=self.num_gpus,
             init_decoder=self.init_decoder,
+            dropout=self.dropout,
         )
 
         # we do softmax over the whole sequence
@@ -771,6 +777,7 @@ class Seq2SeqModelCaffe2:
         num_encoder_layers=1,
         num_decoder_layers=1,
         init_decoder=0,
+        dropout=None,
     ):
         self.model_params = model_params
         self.encoder_type = 'rnn'
@@ -784,6 +791,7 @@ class Seq2SeqModelCaffe2:
         self.num_encoder_layers=num_encoder_layers
         self.num_decoder_layers=num_decoder_layers
         self.init_decoder=init_decoder
+        self.dropout=dropout
 
         workspace.GlobalInit([
             'caffe2',

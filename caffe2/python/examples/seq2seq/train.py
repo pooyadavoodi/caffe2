@@ -34,6 +34,7 @@ def run_seq2seq_model(args, model_params=None):
         num_encoder_layers=args.num_encoder_layers,
         num_decoder_layers=args.num_decoder_layers,
         init_decoder=args.init_decoder,
+        dropout=args.dropout,
     ) as model_obj:
         model_obj.initialize_from_scratch()
 
@@ -267,6 +268,8 @@ def main():
                         help='Number of RNN layers in encoder')
     parser.add_argument('--num-decoder-layers', type=int, default=1,
                         help='Number of RNN layers in decoder')
+    parser.add_argument('--dropout', type=float, default=None,
+                        help='Probability of dropout applied between RNN layers')
     parser.add_argument('--init-decoder', type=int, default=0,
                         help='If use_attention, initialize decoder states with '
                         ' the last encoder states. If 0, the initial decoder '
