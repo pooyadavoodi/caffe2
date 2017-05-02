@@ -344,6 +344,12 @@ class Seq2SeqModelCaffe2:
             'total_loss_scalar_weighted',
             scale=1.0 / self.batch_size,
         )
+        if loss_scale != None:
+            total_loss_scalar_weighted = model.net.Scale(
+                [total_loss_scalar_weighted],
+                [total_loss_scalar_weighted],
+                scale=loss_scale,
+            )
         return [total_loss_scalar_weighted]
 
     def forward_model_build_fun(self, model, loss_scale=None):
