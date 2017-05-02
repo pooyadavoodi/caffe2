@@ -15,6 +15,7 @@ from itertools import izip
 import caffe2.proto.caffe2_pb2 as caffe2_pb2
 from caffe2.python import core, workspace, recurrent, data_parallel_model
 import util, data
+from caffe2.python.models.seq2seq.seq2seq_model_helper import Seq2SeqModelHelper
 
 logging.basicConfig()
 logger = logging.getLogger(__name__)
@@ -27,11 +28,11 @@ class Seq2SeqModelCaffe2:
         self,
         init_params,
     ):
-        model = util.ModelHelper(init_params=init_params)
+        model = Seq2SeqModelHelper(init_params=init_params)
         self._build_shared(model)
         self._build_embeddings(model)
 
-        forward_model = util.ModelHelper(init_params=init_params)
+        forward_model = Seq2SeqModelHelper(init_params=init_params)
         self._build_shared(forward_model)
         self._build_embeddings(forward_model)
 
@@ -75,92 +76,6 @@ class Seq2SeqModelCaffe2:
         self.model = model
         self.forward_net = forward_model.net
 
-    def _build_embedding_encoder(
-        self,
-        model,
-        inputs,
-        input_lengths,
-        vocab_size,
-        embeddings,
-        embedding_size,
-        use_attention,
-        num_layers,
-        dropout,
-        num_gpus,
-        forward_only=False,
-    ):
-        if num_gpus == 0:
-            embedded_encoder_inputs = model.net.Gather(
-                [embeddings, inputs],
-                ['embedded_encoder_inputs'],
-            )
-        else:
-            with core.DeviceScope(core.DeviceOption(caffe2_pb2.CPU)):
-                embedded_encoder_inputs_cpu = model.net.Gather(
-                    [embeddings, inputs],
-                    ['embedded_encoder_inputs_cpu'],
-                )
-            embedded_encoder_inputs = model.CopyCPUToGPU(
-                embedded_encoder_inputs_cpu,
-                'embedded_encoder_inputs',
-            )
-
-        if self.encoder_type == 'rnn':
-            assert len(self.encoder_params['encoder_layer_configs']) == 1
-            encoder_num_units = (
-                self.encoder_params['encoder_layer_configs'][0]['num_units']
-            )
-            encoder_initial_cell_state = model.param_init_net.ConstantFill(
-                [],
-                ['encoder_initial_cell_state'],
-                shape=[encoder_num_units],
-                value=0.0,
-            )
-            encoder_initial_hidden_state = (
-                model.param_init_net.ConstantFill(
-                    [],
-                    'encoder_initial_hidden_state',
-                    shape=[encoder_num_units],
-                    value=0.0,
-                )
-            )
-            # Choose corresponding rnn encoder function
-            if self.encoder_params['use_bidirectional_encoder']:
-                rnn_encoder_func = util.rnn_bidirectional_encoder
-                encoder_output_dim = 2 * encoder_num_units
-            else:
-                rnn_encoder_func = util.rnn_unidirectional_encoder
-                encoder_output_dim = encoder_num_units
-
-            (
-                encoder_outputs,
-                final_encoder_hidden_state,
-                final_encoder_cell_state,
-            ) = rnn_encoder_func(
-                model,
-                embedded_encoder_inputs,
-                input_lengths,
-                encoder_initial_hidden_state,
-                encoder_initial_cell_state,
-                embedding_size,
-                encoder_num_units,
-                use_attention,
-                num_layers,
-                dropout,
-            )
-            weighted_encoder_outputs = None
-        else:
-            raise ValueError('Unsupported encoder type {}'.format(
-                self.encoder_type))
-
-        return (
-            encoder_outputs,
-            weighted_encoder_outputs,
-            final_encoder_hidden_state,
-            final_encoder_cell_state,
-            encoder_output_dim,
-        )
-
     def _build_embedding_decoder(
         self,
         model,
@@ -169,7 +84,7 @@ class Seq2SeqModelCaffe2:
         encoder_outputs,
         final_encoder_hidden_states,
         final_encoder_cell_states,
-        encoder_output_dim,
+        encoder_num_units,
         use_attention,
         num_layers,
         num_gpus,
@@ -181,60 +96,16 @@ class Seq2SeqModelCaffe2:
             self.model_params['decoder_layer_configs'][0]['num_units']
         )
 
-        # Initializing RNN states
-        if (use_attention == False) and (init_decoder == 1):
-            raise ValueError("Use init_decoder=1 only without attention.")
-        if (init_decoder == 1) and (encoder_output_dim != decoder_num_units):
-            raise ValueError("Use init_decoder=1 only if num-units of encoder and decoder are equal.")
-
-        decoder_initial_hidden_states=[]
-        decoder_initial_cell_states=[]
-        assert len(final_encoder_hidden_states) == num_layers
-        assert len(final_encoder_cell_states) == num_layers
-        for l in range(num_layers):
-            if use_attention == False:
-                decoder_initial_hidden_state = model.FC(
-                    final_encoder_hidden_states[l],
-                    'decoder_initial_hidden_state',
-                    encoder_output_dim,
-                    decoder_num_units,
-                    axis=2,
-                )
-                decoder_initial_cell_state = model.FC(
-                    final_encoder_cell_states[l],
-                    'decoder_initial_cell_state',
-                    encoder_output_dim,
-                    decoder_num_units,
-                    axis=2,
-                )
-            else:
-                initial_attention_weighted_encoder_context = (
-                    model.param_init_net.ConstantFill(
-                        [],
-                        'initial_attention_weighted_encoder_context',
-                        shape=[encoder_output_dim],
-                        value=0.0,
-                    )
-                )
-                if init_decoder == 1:
-                    decoder_initial_hidden_state = final_encoder_hidden_states[l]
-                    decoder_initial_cell_state = final_encoder_cell_states[l]
-                else:
-                    decoder_initial_hidden_state = model.param_init_net.ConstantFill(
-                        [],
-                        'decoder_initial_hidden_state',
-                        shape=[decoder_num_units],
-                        value=0.0,
-                    )
-                    decoder_initial_cell_state = model.param_init_net.ConstantFill(
-                        [],
-                        'decoder_initial_cell_state',
-                        shape=[decoder_num_units],
-                        value=0.0,
-                    )
-            decoder_initial_hidden_states.append(decoder_initial_hidden_state)
-            decoder_initial_cell_states.append(decoder_initial_cell_state)
-
+        initial_states = util.build_initial_rnn_decoder_states(
+              model,
+              encoder_num_units,
+              decoder_num_units,
+              final_encoder_hidden_states,
+              final_encoder_cell_states,
+              num_layers,
+              init_decoder,
+              use_attention,
+          )
         # Embedding layer
         if self.num_gpus == 0:
             embedded_decoder_inputs = model.net.Gather(
@@ -262,10 +133,7 @@ class Seq2SeqModelCaffe2:
                 model=model,
                 input_blob=input_blob,
                 seq_lengths=decoder_lengths,
-                initial_states=(
-                    decoder_initial_hidden_states[l],
-                    decoder_initial_cell_states[l],
-                ),
+                initial_states=(initial_states[0][l], initial_states[1][l]),
                 dim_in=dim_in,
                 dim_out=dim_out,
                 scope='decoder/layer_{}'.format(l),
@@ -282,10 +150,7 @@ class Seq2SeqModelCaffe2:
                 model=model,
                 input_blob=input_blob,
                 seq_lengths=decoder_lengths,
-                initial_states=(
-                    decoder_initial_hidden_states[num_layers-1],
-                    decoder_initial_cell_states[num_layers-1],
-                ),
+                initial_states=(initial_states[0][num_layers-1], initial_states[1][num_layers-1]),
                 dim_in=dim_in,
                 dim_out=dim_out,
                 scope='decoder/layer_{}'.format(num_layers-1),
@@ -300,12 +165,10 @@ class Seq2SeqModelCaffe2:
                 model=model,
                 decoder_inputs=input_blob,
                 decoder_input_lengths=decoder_lengths,
-                initial_decoder_hidden_state=decoder_initial_hidden_states[num_layers-1],
-                initial_decoder_cell_state=decoder_initial_cell_states[num_layers-1],
-                initial_attention_weighted_encoder_context=(
-                    initial_attention_weighted_encoder_context
-                ),
-                encoder_output_dim=encoder_output_dim,
+                initial_decoder_hidden_state=initial_states[0][num_layers-1],
+                initial_decoder_cell_state=initial_states[1][num_layers-1],
+                initial_attention_weighted_encoder_context=initial_states[2],
+                encoder_output_dim=encoder_num_units,
                 encoder_outputs=encoder_outputs,
                 decoder_input_dim=dim_in,
                 decoder_state_dim=dim_out,
@@ -320,53 +183,11 @@ class Seq2SeqModelCaffe2:
                 ],
                 axis=2,
             )
-            decoder_output_size = decoder_num_units + encoder_output_dim
+            decoder_output_size = decoder_num_units + encoder_num_units
         return (
             decoder_outputs,
             decoder_output_size,
         )
-
-    def output_projection(
-        self,
-        model,
-        decoder_outputs,
-        decoder_output_size,
-        target_vocab_size,
-        decoder_softmax_size,
-    ):
-        if decoder_softmax_size is not None:
-            decoder_outputs = model.FC(
-                decoder_outputs,
-                'decoder_outputs_scaled',
-                dim_in=decoder_output_size,
-                dim_out=decoder_softmax_size,
-            )
-            decoder_output_size = decoder_softmax_size
-
-        output_projection_w = model.param_init_net.XavierFill(
-            [],
-            'output_projection_w',
-            shape=[self.target_vocab_size, decoder_output_size],
-        )
-
-        output_projection_b = model.param_init_net.XavierFill(
-            [],
-            'output_projection_b',
-            shape=[self.target_vocab_size],
-        )
-        model.params.extend([
-            output_projection_w,
-            output_projection_b,
-        ])
-        output_logits = model.net.FC(
-            [
-                decoder_outputs,
-                output_projection_w,
-                output_projection_b,
-            ],
-            ['output_logits'],
-        )
-        return output_logits
 
     def _build_shared(self, model):
         optimizer_params = self.model_params['optimizer_params']
@@ -440,9 +261,10 @@ class Seq2SeqModelCaffe2:
             weighted_encoder_outputs,
             final_encoder_hidden_states,
             final_encoder_cell_states,
-            encoder_output_dim,
-        ) = self._build_embedding_encoder(
+            encoder_num_units,
+        ) = util.build_embedding_encoder(
             model=model,
+            encoder_params=self.encoder_params,
             inputs=encoder_inputs,
             input_lengths=encoder_lengths,
             vocab_size=self.source_vocab_size,
@@ -452,7 +274,6 @@ class Seq2SeqModelCaffe2:
             num_layers=self.num_encoder_layers,
             dropout=self.dropout,
             num_gpus=self.num_gpus,
-            forward_only=forward_only,
         )
 
         (
@@ -465,7 +286,7 @@ class Seq2SeqModelCaffe2:
             encoder_outputs=encoder_outputs,
             final_encoder_hidden_states=final_encoder_hidden_states,
             final_encoder_cell_states=final_encoder_cell_states,
-            encoder_output_dim=encoder_output_dim,
+            encoder_num_units=encoder_num_units,
             use_attention=(attention_type != 'none'),
             num_layers=self.num_decoder_layers,
             num_gpus=self.num_gpus,
@@ -484,7 +305,7 @@ class Seq2SeqModelCaffe2:
             ],
             shape=[-1, decoder_output_size],
         )
-        output_logits = self.output_projection(
+        output_logits = util.output_projection(
             model=model,
             decoder_outputs=decoder_outputs_flattened,
             decoder_output_size=decoder_output_size,

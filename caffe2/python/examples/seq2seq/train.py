@@ -12,13 +12,25 @@ import random
 import sys
 from timeit import default_timer as timer
 
-from caffe2.python import workspace
+from caffe2.python import workspace, core
 import model, data
 
 logging.basicConfig()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 logger.addHandler(logging.StreamHandler(sys.stderr))
+
+def SaveCheckpoint(path, epoch, model):
+    checkpoint_path = '{0}-{1}.minidb'.format(path, epoch)
+    assert workspace.RunOperatorOnce(core.CreateOperator(
+        'Save',
+        model.GetAllParams(),
+        [],
+        absolute_path=True,
+        db=checkpoint_path,
+        db_type='minidb',
+    ))
+    logger.info('Model saved to ' + checkpoint_path)
 
 def run_seq2seq_model(args, model_params=None):
     (source_vocab, target_vocab,
@@ -213,32 +225,8 @@ def run_seq2seq_model(args, model_params=None):
                 workspace.FeedBlob("learning_rate", np.array([adjusted_lr], dtype=np.float32))
                 print("    Changing learning rate from {} to {}.".format(current_lr, adjusted_lr))
 
-def train(args):
-    run_seq2seq_model(args, model_params=dict(
-        attention=('regular' if args.use_attention else 'none'),
-        decoder_layer_configs=[
-            dict(
-                num_units=args.decoder_cell_num_units,
-            ),
-        ],
-        encoder_type=dict(
-            encoder_layer_configs=[
-                dict(
-                    num_units=args.encoder_cell_num_units,
-                ),
-            ],
-            use_bidirectional_encoder=args.use_bidirectional_encoder,
-        ),
-        batch_size=args.batch_size,
-        optimizer_params=dict(
-            learning_rate=args.learning_rate,
-        ),
-        encoder_embedding_size=args.encoder_embedding_size,
-        decoder_embedding_size=args.decoder_embedding_size,
-        decoder_softmax_size=args.decoder_softmax_size,
-        max_gradient_norm=args.max_gradient_norm,
-    ))
-
+            if args.checkpoint is not None:
+                SaveCheckpoint(path=args.checkpoint, epoch=epoch, model=model_obj.model)
 
 def main():
     random.seed(31415)
@@ -288,11 +276,35 @@ def main():
                         help='Number of GPUs for data parallel model')
     parser.add_argument('--optimizer', type=str,
                         help='Optimizer type: sgd, momentum, adagrad')
+    parser.add_argument('--checkpoint', type=str, default=None,
+                        help='Path to checkpoint')
 
     args = parser.parse_args()
 
-    train(args)
-
+    run_seq2seq_model(args, model_params=dict(
+        attention=('regular' if args.use_attention else 'none'),
+        decoder_layer_configs=[
+            dict(
+                num_units=args.decoder_cell_num_units,
+            ),
+        ],
+        encoder_type=dict(
+            encoder_layer_configs=[
+                dict(
+                    num_units=args.encoder_cell_num_units,
+                ),
+            ],
+            use_bidirectional_encoder=args.use_bidirectional_encoder,
+        ),
+        batch_size=args.batch_size,
+        optimizer_params=dict(
+            learning_rate=args.learning_rate,
+        ),
+        encoder_embedding_size=args.encoder_embedding_size,
+        decoder_embedding_size=args.decoder_embedding_size,
+        decoder_softmax_size=args.decoder_softmax_size,
+        max_gradient_norm=args.max_gradient_norm,
+    ))
 
 if __name__ == '__main__':
     main()

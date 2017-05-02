@@ -7,52 +7,9 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
-from caffe2.python import recurrent
+import caffe2.proto.caffe2_pb2 as caffe2_pb2
 from caffe2.python.cnn import CNNModelHelper
-
-
-class ModelHelper(CNNModelHelper):
-
-    def __init__(self, init_params=True):
-        super(ModelHelper, self).__init__(
-            order='NCHW',  # this is only relevant for convolutional networks
-            init_params=init_params,
-        )
-        self.non_trainable_params = []
-
-    def AddParam(self, name, init=None, init_value=None, trainable=True):
-        """Adds a parameter to the model's net and it's initializer if needed
-
-        Args:
-            init: a tuple (<initialization_op_name>, <initialization_op_kwargs>)
-            init_value: int, float or str. Can be used instead of `init` as a
-                simple constant initializer
-            trainable: bool, whether to compute gradient for this param or not
-        """
-        if init_value is not None:
-            assert init is None
-            assert type(init_value) in [int, float, str]
-            init = ('ConstantFill', dict(
-                shape=[1],
-                value=init_value,
-            ))
-
-        if self.init_params:
-            param = self.param_init_net.__getattr__(init[0])(
-                [],
-                name,
-                **init[1]
-            )
-        else:
-            param = self.net.AddExternalInput(name)
-
-        if trainable:
-            self.params.append(param)
-        else:
-            self.non_trainable_params.append(param)
-
-        return param
-
+from caffe2.python import core, workspace, recurrent
 
 def rnn_unidirectional_encoder(
     model,
@@ -186,3 +143,205 @@ def rnn_bidirectional_encoder(
         dim_in=dim_out
 
     return outputs, final_hidden_states, final_cell_states
+
+
+
+
+def build_embedding_encoder(
+    model,
+    encoder_params,
+    inputs,
+    input_lengths,
+    vocab_size,
+    embeddings,
+    embedding_size,
+    use_attention,
+    num_layers,
+    dropout,
+    num_gpus,
+    scope=None,
+):
+    with core.NameScope(scope or ''):
+      if num_gpus == 0:
+          embedded_encoder_inputs = model.net.Gather(
+              [embeddings, inputs],
+              ['embedded_encoder_inputs'],
+          )
+      else:
+          with core.DeviceScope(core.DeviceOption(caffe2_pb2.CPU)):
+              embedded_encoder_inputs_cpu = model.net.Gather(
+                  [embeddings, inputs],
+                  ['embedded_encoder_inputs_cpu'],
+              )
+          embedded_encoder_inputs = model.CopyCPUToGPU(
+              embedded_encoder_inputs_cpu,
+              'embedded_encoder_inputs',
+          )
+
+    assert len(encoder_params['encoder_layer_configs']) == 1
+    encoder_num_units = (
+        encoder_params['encoder_layer_configs'][0]['num_units']
+    )
+    with core.NameScope(scope or ''):
+        encoder_initial_cell_state = model.param_init_net.ConstantFill(
+            [],
+            ['encoder_initial_cell_state'],
+            shape=[encoder_num_units],
+            value=0.0,
+        )
+        encoder_initial_hidden_state = (
+            model.param_init_net.ConstantFill(
+                [],
+                'encoder_initial_hidden_state',
+                shape=[encoder_num_units],
+                value=0.0,
+            )
+        )
+        # Choose corresponding rnn encoder function
+        if encoder_params['use_bidirectional_encoder']:
+            rnn_encoder_func = rnn_bidirectional_encoder
+            encoder_output_dim = 2 * encoder_num_units
+        else:
+            rnn_encoder_func = rnn_unidirectional_encoder
+            encoder_output_dim = encoder_num_units
+    (
+        encoder_outputs,
+        final_encoder_hidden_state,
+        final_encoder_cell_state,
+    ) = rnn_encoder_func(
+        model,
+        embedded_encoder_inputs,
+        input_lengths,
+        encoder_initial_hidden_state,
+        encoder_initial_cell_state,
+        embedding_size,
+        encoder_num_units,
+        use_attention,
+        num_layers,
+        dropout,
+    )
+    weighted_encoder_outputs = None
+
+    return (
+        encoder_outputs,
+        weighted_encoder_outputs,
+        final_encoder_hidden_state,
+        final_encoder_cell_state,
+        encoder_output_dim,
+    )
+
+def build_initial_rnn_decoder_states(
+    model,
+    encoder_num_units,
+    decoder_num_units,
+    final_encoder_hidden_states,
+    final_encoder_cell_states,
+    num_layers,
+    init_decoder,
+    use_attention,
+):
+    # Initializing RNN states
+    if (use_attention == False) and (init_decoder == 1):
+        raise ValueError("Use init_decoder=1 only without attention.")
+    if (init_decoder == 1) and (encoder_num_units != decoder_num_units):
+        raise ValueError("Use init_decoder=1 only if num-units of encoder and decoder are equal.")
+    if(init_decoder):
+      assert len(final_encoder_hidden_states) == num_layers
+      assert len(final_encoder_cell_states) == num_layers
+
+    decoder_initial_hidden_states=[]
+    decoder_initial_cell_states=[]
+    for l in range(num_layers):
+        if use_attention:
+            if init_decoder == 1:
+                decoder_initial_hidden_state = final_encoder_hidden_states[l]
+                decoder_initial_cell_state = final_encoder_cell_states[l]
+            else:
+                decoder_initial_hidden_state = model.param_init_net.ConstantFill(
+                    [],
+                    'decoder_initial_hidden_state',
+                    shape=[decoder_num_units],
+                    value=0.0,
+                )
+                decoder_initial_cell_state = model.param_init_net.ConstantFill(
+                    [],
+                    'decoder_initial_cell_state',
+                    shape=[decoder_num_units],
+                    value=0.0,
+                )
+        else:
+            decoder_initial_hidden_state = model.FC(
+                final_encoder_hidden_states[l],
+                'decoder_initial_hidden_state',
+                encoder_num_units,
+                decoder_num_units,
+                axis=2,
+            )
+            decoder_initial_cell_state = model.FC(
+                final_encoder_cell_states[l],
+                'decoder_initial_cell_state',
+                encoder_num_units,
+                decoder_num_units,
+                axis=2,
+            )
+        decoder_initial_hidden_states.append(decoder_initial_hidden_state)
+        decoder_initial_cell_states.append(decoder_initial_hidden_state)
+
+    if use_attention:
+        initial_attention_weighted_encoder_context = (
+            model.param_init_net.ConstantFill(
+                [],
+                'initial_attention_weighted_encoder_context',
+                shape=[encoder_num_units],
+                value=0.0,
+            )
+        )
+        return (decoder_initial_hidden_states,
+                decoder_initial_cell_states,
+                initial_attention_weighted_encoder_context)
+    else:
+        return (decoder_initial_hidden_states,
+                decoder_initial_cell_states)
+
+def output_projection(
+    model,
+    decoder_outputs,
+    decoder_output_size,
+    target_vocab_size,
+    decoder_softmax_size,
+):
+    if decoder_softmax_size is not None:
+        decoder_outputs = model.FC(
+            decoder_outputs,
+            'decoder_outputs_scaled',
+            dim_in=decoder_output_size,
+            dim_out=decoder_softmax_size,
+        )
+        decoder_output_size = decoder_softmax_size
+
+    output_projection_w = model.param_init_net.XavierFill(
+        [],
+        'output_projection_w',
+        shape=[target_vocab_size, decoder_output_size],
+    )
+
+    output_projection_b = model.param_init_net.XavierFill(
+        [],
+        'output_projection_b',
+        shape=[target_vocab_size],
+    )
+    model.params.extend([
+        output_projection_w,
+        output_projection_b,
+    ])
+    output_logits = model.net.FC(
+        [
+            decoder_outputs,
+            output_projection_w,
+            output_projection_b,
+        ],
+        ['output_logits'],
+    )
+    return output_logits
+
+
