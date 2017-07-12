@@ -537,7 +537,7 @@ class HypothesisTestCase(test_util.TestCase):
                     b,
                     device_option=input_device_options.get(n, device_option)
                 )
-                print("Input", n, input_device_options.get(n, device_option))
+                print("Input", n, input_device_options.get(n, device_option), b.shape)
 #            net = core.Net("opnet")
 #            net.Proto().op.extend([op])
             test_shape_inference = False
@@ -551,16 +551,40 @@ class HypothesisTestCase(test_util.TestCase):
                 if os.getenv('CAFFE2_ASSERT_SHAPEINFERENCE') == '1':
                     raise e
             workspace.RunNetOnce(net)
-            reference_outputs = reference(*[i[1] for i in inputs])
+#            reference_outputs = reference(*[i[1] for i in inputs])
+            reference_outputs = reference(**dict(inputs))
             if not (isinstance(reference_outputs, tuple) or
                     isinstance(reference_outputs, list)):
                 raise RuntimeError(
                     "You are providing a wrong reference implementation. A "
                     "proper one should return a tuple/list of numpy arrays.")
             self.assertEqual(len(reference_outputs), len(outputs_to_check))
+
+#            print("blobs")
+#            for b in ["external/recurrent/hidden_t_all",
+#                      "external/recurrent/hidden_t_last",
+#                      "external/recurrent/cell_t_all",
+#                      "external/recurrent/cell_t_last",
+#                     ]:
+#                print(b, workspace.FetchBlob(b).shape)
+#            print("blobs done")
+
+
+            print("blobs")
+            for b in ["external/recurrent/layer_0/hidden_t_all",
+                      "external/recurrent/layer_0/hidden_t_last",
+                      "external/recurrent/layer_0/cell_t_all",
+                      "external/recurrent/layer_0/cell_t_last",
+                     ]:
+                print(b, workspace.FetchBlob(b).shape)
+            print("blobs done")
+
+
             outs = []
             for (output_blob_name, ref) in zip(outputs_to_check, reference_outputs):
                 output = workspace.FetchBlob(output_blob_name)
+                print(output_blob_name, output.shape)
+                print("ref", ref.shape)
                 if output.dtype.kind in ('S', 'O'):
                     np.testing.assert_array_equal(output, ref)
                 else:

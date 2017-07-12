@@ -91,6 +91,50 @@ def lstm_reference(input, hidden_input, cell_input,
     )
 
 
+def stacked_lstm_rnn_reference(input, input_w, input_b, hidden_input, cell_input,
+                               gates_w, gates_b, seq_lengths, num_layers, forget_bias):
+    print("input", input.shape)
+    print("input_w", input_w.shape)
+    print("hidden_input", hidden_input.shape)
+    print("cell_input", cell_input.shape)
+    print("gates_w", gates_w.shape)
+    T = input.shape[0]
+    N = input.shape[1]
+    D = hidden_input.shape[hidden_input.ndim - 1]
+    hidden = np.zeros(shape=(num_layers, T + 1, N, D))
+    cell = np.zeros(shape=(num_layers, T + 1, N, D))
+    assert hidden.shape[1] == T + 1
+    assert cell.shape[1] == T + 1
+    assert hidden.shape[2] == N
+    assert cell.shape[2] == N
+    cell[:, 0, :, :] = cell_input
+    hidden[:, 0, :, :] = hidden_input
+
+    for l in range(num_layers):
+        for t in range(T):
+            input_t = input[t].reshape(1, N, D)
+            hidden_t_prev = hidden[l, t].reshape(1, N, D)
+            cell_t_prev = cell[l, t].reshape(1, N, D)
+            gates = np.dot(hidden_t_prev, gates_w[l].T) + gates_b[l] + \
+                    np.dot(input_t, input_w[l].T) + input_b[l]
+            hidden_t, cell_t = lstm_unit(
+                hidden_t_prev,
+                cell_t_prev,
+                gates,
+                seq_lengths,
+                t,
+                forget_bias,
+            )
+            hidden[l, t + 1] = hidden_t
+            cell[l, t + 1] = cell_t
+    return (
+        hidden[-1, 1:],
+        hidden[-1, -1].reshape(1, N, D),
+        cell[-1, 1:],
+        cell[-1, -1].reshape(1, N, D)
+    )
+
+
 def lstm_rnn_reference(input, input_w, input_b, hidden_input, cell_input,
                    gates_w, gates_b, seq_lengths, forget_bias):
     T = input.shape[0]
@@ -508,6 +552,98 @@ class RecurrentNetworkTest(hu.HypothesisTestCase):
                 recurrent.MILSTM, t, n, d, ref,
                 outputs_with_grads, memory_optim, forget_bias)
 
+    @given(t=st.integers(1, 1),
+           n=st.integers(1, 1),
+           data_strategy=st.data(),
+           num_layers=st.integers(2, 2),
+           memory_optim=st.booleans(),
+           **hu.gcs)
+    def test_stacked_lstm_rnn(self, t, n, data_strategy, num_layers, memory_optim, gc, dc):
+        d = data_strategy.draw(
+            st.lists(st.integers(1, 1), min_size=num_layers, max_size=num_layers))
+        for outputs_with_grads in [[0], [1], [0, 1, 2, 3]]:
+            def ref(**kwargs):
+                input=kwargs["input_blob"]
+                hidden_input=kwargs["hidden_init"]
+                cell_input=kwargs["cell_init"]
+                seq_lengths=kwargs["seq_lengths"]
+                input_w=[]
+                input_b=[]
+                gates_w=[]
+                gates_b=[]
+                for i in range(num_layers):
+                    input_w.append(kwargs["external/recurrent/layer_{}/i2h_w".format(i)])
+                    input_b.append(kwargs["external/recurrent/layer_{}/i2h_b".format(i)])
+                    gates_w.append(kwargs["external/recurrent/layer_{}/gates_t_w".format(i)])
+                    gates_b.append(kwargs["external/recurrent/layer_{}/gates_t_b".format(i)])
+                return stacked_lstm_rnn_reference(input, np.array(input_w), np.array(input_b),
+                                                  hidden_input, cell_input,
+                                                  np.array(gates_w), np.array(gates_b), seq_lengths,
+                                                  num_layers=num_layers, forget_bias=0.0)
+            self.stacked_lstm_rnn(t, n, d, num_layers, ref, outputs_with_grads,
+                          memory_optim, gc, dc)
+    def stacked_lstm_rnn(self, t, n, d, num_layers, ref, outputs_with_grads,
+                 memory_optim, gc, dc, forget_bias=0.0):
+        with core.DeviceScope(gc):
+          model = CNNModelHelper(name='external')
+          input_blob, seq_lengths, hidden_init, cell_init = (
+              model.net.AddExternalInputs(
+                  'input_blob', 'seq_lengths', 'hidden_init', 'cell_init'))
+          recurrent.stacked_LSTM(
+              model, input_blob, seq_lengths, (hidden_init, cell_init),
+              d, d, num_layers, scope="external/recurrent",
+              outputs_with_grads=outputs_with_grads,
+              memory_optimization=memory_optim,
+              forget_bias=forget_bias,
+          )
+
+        with open("model.pbtxt", "w") as f:
+          f.write(str(model.net.Proto()))
+        with open("model_init.pbtxt", "w") as f:
+          f.write(str(model.param_init_net.Proto()))
+        workspace.RunNetOnce(model.param_init_net)
+
+        inputs=[]
+        for blob in workspace.Blobs():
+            inputs.append((blob, workspace.FetchBlob(blob)))
+
+        print("t", t)
+        print("n", n)
+        print("d", d)
+        print("num_layers", num_layers)
+        d_max = max(d)
+        workspace.FeedBlob(
+            str(input_blob), np.random.randn(t, n, d[0]).astype(np.float32))
+        workspace.FeedBlob("hidden_init", np.random.randn(num_layers, n, d_max).astype(np.float32))
+        workspace.FeedBlob("cell_init", np.random.randn(num_layers, n, d_max).astype(np.float32))
+        workspace.FeedBlob(
+            "seq_lengths",
+            np.random.randint(1, t + 1, size=(n,)).astype(np.int32)
+        )
+
+
+        inputs += [(name, workspace.FetchBlob(name)) for name in
+                    [
+                        "input_blob",
+                        "hidden_init",
+                        "cell_init",
+                        "seq_lengths"
+                    ]
+                 ]
+        outputs_to_check=np.array([
+          "external/recurrent/layer_{}/hidden_t_all".format(num_layers-1),
+          "external/recurrent/layer_{}/hidden_t_last".format(num_layers-1),
+          "external/recurrent/layer_{}/cell_t_all".format(num_layers-1),
+          "external/recurrent/layer_{}/cell_t_last".format(num_layers-1),
+          ])
+        self.assertReferenceChecksNet(
+            device_option=gc,
+            net=model.net,
+            inputs=inputs,
+            reference=ref,
+            outputs_to_check=outputs_to_check
+        )
+ 
     @given(t=st.integers(1, 4),
            n=st.integers(1, 5),
            d=st.integers(1, 5),
@@ -517,38 +653,33 @@ class RecurrentNetworkTest(hu.HypothesisTestCase):
         for outputs_with_grads in [[0], [1], [0, 1, 2, 3]]:
             def ref(*args):
                 return lstm_rnn_reference(*args, forget_bias=0.0)
-            self.lstm_rnn(
-                recurrent.LSTM, t, n, d, ref, outputs_with_grads,
-                memory_optim, gc, dc)
-    def lstm_rnn(self, create_lstm, t, n, d, ref,
-             outputs_with_grads, memory_optim, gc, dc, forget_bias=0.0):
+            self.lstm_rnn(t, n, d, ref, outputs_with_grads,
+                          memory_optim, gc, dc)
+    def lstm_rnn(self, t, n, d, ref, outputs_with_grads,
+                 memory_optim, gc, dc, forget_bias=0.0):
         with core.DeviceScope(gc):
           model = CNNModelHelper(name='external')
           input_blob, seq_lengths, hidden_init, cell_init = (
               model.net.AddExternalInputs(
                   'input_blob', 'seq_lengths', 'hidden_init', 'cell_init'))
-          create_lstm(
+          recurrent.LSTM(
               model, input_blob, seq_lengths, (hidden_init, cell_init),
               d, d, scope="external/recurrent",
               outputs_with_grads=outputs_with_grads,
               memory_optimization=memory_optim,
               forget_bias=forget_bias,
           )
-        workspace.RunNetOnce(model.param_init_net)
 
-        def generate_random_state(n, d):
-            ndim = int(np.random.choice(3, 1)) + 1
-            if ndim == 1:
-                return np.random.randn(1, n, d).astype(np.float32)
-            random_state = np.random.randn(n, d).astype(np.float32)
-            if ndim == 3:
-                random_state = random_state.reshape([1, n, d])
-            return random_state
+        with open("model.pbtxt", "w") as f:
+          f.write(str(model.net.Proto()))
+        with open("model_init.pbtxt", "w") as f:
+          f.write(str(model.param_init_net.Proto()))
+        workspace.RunNetOnce(model.param_init_net)
 
         workspace.FeedBlob(
             str(input_blob), np.random.randn(t, n, d).astype(np.float32))
-        workspace.FeedBlob("hidden_init", generate_random_state(n, d))
-        workspace.FeedBlob("cell_init", generate_random_state(n, d))
+        workspace.FeedBlob("hidden_init", np.random.randn(n, d).astype(np.float32))
+        workspace.FeedBlob("cell_init", np.random.randn(n, d).astype(np.float32))
         workspace.FeedBlob(
             "seq_lengths",
             np.random.randint(1, t + 1, size=(n,)).astype(np.int32)

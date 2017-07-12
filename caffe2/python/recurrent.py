@@ -250,10 +250,122 @@ def recurrent_net(
         outputs_with_grads=outputs_with_grads,
         recompute_blobs_on_backward=map(str, recompute_blobs_on_backward)
     )
+    print("all_outputs", all_outputs)
     # The last output is a list of step workspaces,
     # which is only needed internally for gradient propogation
     return results[:-1]
 
+
+def stacked_LSTM(model, input_blob, seq_lengths, initial_states, dims_in, dims_out, num_layers,
+         scope, outputs_with_grads=(0,), return_params=False,
+         memory_optimization=False, forget_bias=0.0, **kwargs):
+    def s(name, layer):
+        # We have to manually scope due to our internal/external blob
+        # relationships.
+        return "{}/layer_{}/{}".format(str(scope), str(layer), str(name))
+
+    layer_id = 0
+    """ initial bulk fully-connected """
+    input_blob = model.FC(
+        input_blob, s('i2h', layer_id), dim_in=dims_in[layer_id], 
+        dim_out=4 * dims_out[layer_id], axis=2)
+
+    """ the step net """
+    step_model = CNNModelHelper(name='lstm_cell', param_model=model)
+    input_t, timestep, cell_t_prev, hidden_t_prev = (
+        step_model.net.AddScopedExternalInputs(
+#            'input_t', 'timestep', 'cell_t_prev', 'hidden_t_prev'))
+            s('input_t', layer_id),
+            s('timestep', layer_id),
+            s('cell_t_prev', layer_id),
+            s('hidden_t_prev', layer_id)))
+    gates_t = step_model.FC(
+        hidden_t_prev, s('gates_t', layer_id), dim_in=dims_out[layer_id],
+        dim_out=4 * dims_out[layer_id], axis=2)
+    step_model.net.Sum([gates_t, input_t], gates_t)
+    hidden_t, cell_t = step_model.net.LSTMUnit(
+        [hidden_t_prev, cell_t_prev, gates_t, seq_lengths, timestep],
+        [s('hidden_t', layer_id), s('cell_t', layer_id)],
+        forget_bias=forget_bias,
+    )
+    step_model.net.AddExternalOutputs(cell_t, hidden_t)
+
+    """ recurrent network """
+    (hidden_input_blob, cell_input_blob) = initial_states
+    output, last_output, all_states, last_state = recurrent_net(
+        net=model.net,
+        cell_net=step_model.net,
+        inputs=[(input_t, input_blob)],
+        initial_cell_inputs=[
+            (hidden_t_prev, hidden_input_blob),
+            (cell_t_prev, cell_input_blob),
+        ],
+        links={
+            hidden_t_prev: hidden_t,
+            cell_t_prev: cell_t,
+        },
+        timestep=timestep,
+        scope=scope + "/layer_" + str(layer_id),
+        outputs_with_grads=outputs_with_grads,
+        recompute_blobs_on_backward=[gates_t] if memory_optimization else None
+    )
+
+
+    layer_id = 1
+    input_blob = model.FC(
+        output, s('i2h', layer_id), dim_in=dims_in[layer_id], 
+        dim_out=4 * dims_out[layer_id], axis=2)
+
+    """ the step net """
+    step_model = CNNModelHelper(name='lstm_cell', param_model=model)
+    input_t, timestep, cell_t_prev, hidden_t_prev = (
+        step_model.net.AddScopedExternalInputs(
+#            'input_t', 'timestep', 'cell_t_prev', 'hidden_t_prev'))
+            s('input_t', layer_id),
+            s('timestep', layer_id),
+            s('cell_t_prev', layer_id),
+            s('hidden_t_prev', layer_id)))
+    gates_t = step_model.FC(
+        hidden_t_prev, s('gates_t', layer_id), dim_in=dims_out[layer_id],
+        dim_out=4 * dims_out[layer_id], axis=2)
+    step_model.net.Sum([gates_t, input_t], gates_t)
+    hidden_t, cell_t = step_model.net.LSTMUnit(
+        [hidden_t_prev, cell_t_prev, gates_t, seq_lengths, timestep],
+        [s('hidden_t', layer_id), s('cell_t', layer_id)],
+        forget_bias=forget_bias,
+    )
+    step_model.net.AddExternalOutputs(cell_t, hidden_t)
+
+    """ recurrent network """
+    (hidden_input_blob, cell_input_blob) = initial_states
+    output, last_output, all_states, last_state = recurrent_net(
+        net=model.net,
+        cell_net=step_model.net,
+        inputs=[(input_t, input_blob)],
+        initial_cell_inputs=[
+            (hidden_t_prev, hidden_input_blob),
+            (cell_t_prev, cell_input_blob),
+        ],
+        links={
+            hidden_t_prev: hidden_t,
+            cell_t_prev: cell_t,
+        },
+        timestep=timestep,
+        scope=scope + "/layer_" + str(layer_id),
+        outputs_with_grads=outputs_with_grads,
+        recompute_blobs_on_backward=[gates_t] if memory_optimization else None
+    )
+    if return_params:
+        params = {
+            'input':
+            {'weights': input_blob + "_w",
+             'biases': input_blob + '_b'},
+            'recurrent': {'weights': gates_t + "_w",
+                          'biases': gates_t + '_b'}
+        }
+        return output, last_output, all_states, last_state, params
+    else:
+        return output, last_output, all_states, last_state
 
 def LSTM(model, input_blob, seq_lengths, initial_states, dim_in, dim_out,
          scope, outputs_with_grads=(0,), return_params=False,
