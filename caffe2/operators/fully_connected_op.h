@@ -1,19 +1,3 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 #ifndef CAFFE2_OPERATORS_FULLY_CONNECTED_OP_H_
 #define CAFFE2_OPERATORS_FULLY_CONNECTED_OP_H_
 
@@ -34,6 +18,12 @@ class FullyConnectedOp final : public Operator<Context> {
         axis_(OperatorBase::GetSingleArgument<int32_t>("axis", 1)),
         axis_w_(OperatorBase::GetSingleArgument<int32_t>("axis_w", 1)) {}
   ~FullyConnectedOp() {}
+
+  template <
+      typename T_B,
+      typename MATH,
+      typename T_Y>
+  void AddBiasWithType();
 
   template <
       typename T_X,
@@ -107,27 +97,8 @@ class FullyConnectedOp final : public Operator<Context> {
         Y->template mutable_data<T_Y>(),
         &context_);
     // Add bias term
-    if (bias_multiplier_.size() != M) {
-      // If the helper bias multiplier is not M, reshape and fill it with one.
-      bias_multiplier_.Resize(M);
-      math::Set<T_B, Context>(
-          M,
-          convert::To<float, T_B>(1),
-          bias_multiplier_.template mutable_data<T_B>(),
-          &context_);
-    }
-    math::Gemm<T_B, Context, Engine>(
-        CblasNoTrans,
-        CblasNoTrans,
-        M,
-        N,
-        1,
-        1,
-        bias_multiplier_.template data<T_B>(),
-        b.template data<T_B>(),
-        1,
-        Y->template mutable_data<T_Y>(),
-        &context_);
+    AddBiasWithType<T_B, MATH, T_Y>();
+
     return true;
   }
 

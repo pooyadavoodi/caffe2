@@ -1,22 +1,51 @@
-/**
- * Copyright (c) 2016-present, Facebook, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 #include "caffe2/operators/fully_connected_op.h"
 
 namespace caffe2 {
+
+namespace {
+
+template <typename T_BIAS,
+					typename MATH,
+					typename T_Y>
+void FCBiasAdd(
+  const T_BIAS* bias,
+  const int image_rows,
+  const int image_cols,
+  T_Y* image) {
+
+  for (int row=0; row<image_rows; ++row) {
+    T_Y* image_row = &image[row*image_cols];
+
+    for (int col=0; col<image_cols; ++col) {
+      image_row[col] += (T_Y)bias[col];
+    }
+  }
+}
+
+};
+
+template <>
+template <typename T_B,
+          typename MATH,
+          typename T_Y>
+void FullyConnectedOp<CPUContext>::AddBiasWithType() {
+  auto& X = Input(0);
+  auto& W = Input(1);
+  auto& b = Input(2);
+  auto* Y = Output(0);
+
+  auto dims = Y->dims();
+
+  auto canonical_axis = X.canonical_axis_index(axis_);
+  auto M = X.size_to_dim(canonical_axis);
+  auto N = W.dim32(0);
+
+  FCBiasAdd<T_B, MATH, T_Y>(
+      b.template data<T_B>(),
+      M,
+      N,
+      Y->template mutable_data<T_Y>());
+}
 
 REGISTER_CPU_OPERATOR(FC, FullyConnectedOp<CPUContext>);
 REGISTER_CPU_OPERATOR(FCGradient, FullyConnectedGradientOp<CPUContext>);
